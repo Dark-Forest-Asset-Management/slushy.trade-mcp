@@ -1,0 +1,31 @@
+[Unit]
+Description=slushy.trade MCP server (supporter-gated, fronts HyPaper)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=debian
+WorkingDirectory=/opt/slushy-trade-mcp
+EnvironmentFile=/opt/slushy-trade-mcp/.env
+# npm cache/config lookups during npx — keep a writable HOME under /opt.
+Environment=HOME=/opt/slushy-trade-mcp
+ExecStart=/usr/bin/npx tsx src/index.ts
+Restart=on-failure
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=slushy-trade-mcp
+
+# Hardening. State is in-memory (no data dir), so the whole fs can be
+# read-only except /tmp.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ReadWritePaths=/opt/slushy-trade-mcp
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+
+[Install]
+WantedBy=multi-user.target

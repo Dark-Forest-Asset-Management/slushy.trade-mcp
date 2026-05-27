@@ -6,9 +6,22 @@ function required(name: string): string {
   return v;
 }
 
+// Public origin this server is reached at (through nginx). OAuth metadata,
+// the authorization/token endpoints, and the protected-resource id are all
+// derived from it, so it MUST match what clients hit (prod: https://slushy.trade).
+const publicBaseUrl = (process.env.PUBLIC_BASE_URL ?? 'https://slushy.trade').replace(/\/$/, '');
+
 export const config = {
   port: Number.parseInt(process.env.PORT ?? '8788', 10),
   host: process.env.HOST ?? '127.0.0.1',
+
+  // OAuth 2.1 (so the ChatGPT app + one-click Claude Desktop can connect).
+  // The issuer/AS and the resource live on the same origin behind nginx.
+  publicBaseUrl,
+  mcpResourceUrl: `${publicBaseUrl}/mcp`,
+  // Where the browser is sent to consent (connect wallet + sign). The slushy
+  // SPA renders the consent screen when it sees `?mcp_authorize=<id>`.
+  consentUrl: (process.env.SLUSHY_CONSENT_URL ?? publicBaseUrl).replace(/\/$/, ''),
 
   // HyPaper backend this MCP server proxies.
   hypaperHttpUrl: (process.env.HYPAPER_HTTP_URL ?? 'http://localhost:3000').replace(/\/$/, ''),

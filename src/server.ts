@@ -15,6 +15,7 @@ import { randomUUID } from 'node:crypto';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { isInitializeRequest } from '@modelcontextprotocol/sdk/types.js';
 import { authenticate } from './auth.js';
+import * as oauth from './oauth.js';
 import { buildSession } from './mcp.js';
 import { setChart, setDrawings, getAgentDrawings, getClearUserSignal } from './chart-store.js';
 import type { SessionStreams } from './streaming.js';
@@ -41,10 +42,68 @@ export function createApp() {
   });
 
   app.use(express.json({ limit: '1mb' }));
+  // OAuth token + registration bodies arrive form-encoded or JSON; parse both.
+  app.use(express.urlencoded({ extended: false, limit: '1mb' }));
 
   const sessions = new Map<string, Session>();
 
   app.get('/health', (_req, res) => res.json({ status: 'ok', sessions: sessions.size }));
+
+  // ─── OAuth 2.1 — lets the ChatGPT app + one-click Claude Desktop connect ──
+  // The access token issued at the end is the SAME wallet-signature token the
+  // resource server already verifies; this is just the standard delivery flow.
+
+  // Protected-resource metadata (RFC 9728). Some clients append the resource
+  // path segment, so serve both forms.
+  const prMeta = (_req: Request, res: Response) => res.json(oauth.protectedResourceMetadata());
+  app.get('/.well-known/oauth-protected-resource', prMeta);
+  app.get('/.well-known/oauth-protected-resource/mcp', prMeta);
+
+  // Authorization-server metadata (RFC 8414) + the OIDC alias some clients probe.
+  const asMeta = (_req: Request, res: Response) => res.json(oauth.authorizationServerMetadata());
+  app.get('/.well-known/oauth-authorization-server', asMeta);
+  app.get('/.well-known/oauth-authorization-server/mcp', asMeta);
+  app.get('/.well-known/openid-configuration', asMeta);
+
+  // Dynamic client registration (RFC 7591) — clients self-register, no secret.
+  app.post('/oauth/register', (req: Request, res: Response) => {
+    const result = oauth.registerClient((req.body ?? {}) as { redirect_uris?: unknown; client_name?: unknown });
+    if (!result.ok) { res.status(400).json({ error: result.error, error_description: result.error_description }); return; }
+    res.status(201).json(result.doc);
+  });
+
+  // Authorization endpoint — the browser lands here; we bounce it to the
+  // slushy consent page (connect wallet + sign).
+  app.get('/oauth/authorize', (req: Request, res: Response) => {
+    const r = oauth.startAuthorize(req.query as Record<string, string | undefined>);
+    if (r.kind === 'redirect' || r.kind === 'error_redirect') { res.redirect(302, r.url); return; }
+    res.status(r.status).type('text/plain').send(r.error);
+  });
+
+  // Consent page asks who's requesting access.
+  app.get('/oauth/authorize/info', (req: Request, res: Response) => {
+    const info = oauth.authorizeInfo(String(req.query.authzId ?? ''));
+    if (!info) { res.status(404).json({ error: 'unknown_or_expired' }); return; }
+    res.json(info);
+  });
+
+  // Consent page posts the signed wallet token; we mint the code and return
+  // the URL to bounce the browser back to the requesting client.
+  app.post('/oauth/authorize/complete', async (req: Request, res: Response) => {
+    const { authzId, token } = (req.body ?? {}) as { authzId?: string; token?: string };
+    if (!authzId || !token) { res.status(400).json({ error: 'authzId and token are required' }); return; }
+    const r = await oauth.completeAuthorize(authzId, token);
+    if (!r.ok) { res.status(r.status).json({ error: r.error }); return; }
+    res.json({ redirectTo: r.redirectTo });
+  });
+
+  // Token endpoint — authorization code (+ PKCE verifier) → access_token.
+  app.post('/oauth/token', (req: Request, res: Response) => {
+    const r = oauth.exchangeToken((req.body ?? {}) as Record<string, string | undefined>);
+    res.header('Cache-Control', 'no-store');
+    if (!r.ok) { res.status(r.status).json({ error: r.error, ...(r.error_description ? { error_description: r.error_description } : {}) }); return; }
+    res.json(r.token);
+  });
 
   // Chart screenshot upload (supporter-gated). slushy POSTs the exported PNG
   // (raw image body) with the same Bearer token; cached per wallet for the
@@ -103,6 +162,11 @@ export function createApp() {
 
     const auth = await authenticate(req.headers.authorization);
     if (!auth.ok) {
+      // Point unauthenticated clients at OAuth discovery so the ChatGPT app /
+      // Claude Desktop can start the flow (RFC 9728 challenge).
+      if (auth.status === 401) {
+        res.header('WWW-Authenticate', `Bearer resource_metadata="${config.publicBaseUrl}/.well-known/oauth-protected-resource"`);
+      }
       res.status(auth.status).json({ jsonrpc: '2.0', error: { code: -32001, message: auth.error }, id: null });
       return;
     }

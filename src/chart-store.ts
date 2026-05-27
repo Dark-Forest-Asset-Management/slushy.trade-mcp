@@ -42,3 +42,27 @@ export function setDrawings(wallet: string, data: unknown): void {
 export function getDrawings(wallet: string): DrawingsEntry | undefined {
   return drawings.get(wallet.toLowerCase());
 }
+
+// ── agent-authored drawings (the AI annotates the user's chart) ──────────
+// add_chart_drawing appends here; the slushy frontend polls GET /agent-drawings
+// and importDrawings()-renders them. clear_chart_drawings empties it.
+const agentDrawings = new Map<string, unknown[]>();
+
+export function addAgentDrawing(wallet: string, drawing: unknown): number {
+  const key = wallet.toLowerCase();
+  const list = agentDrawings.get(key) ?? [];
+  list.push(drawing);
+  agentDrawings.set(key, list);
+  return list.length;
+}
+
+export function getAgentDrawings(wallet: string): unknown[] {
+  return agentDrawings.get(wallet.toLowerCase()) ?? [];
+}
+
+export function clearAgentDrawings(wallet: string): number {
+  const key = wallet.toLowerCase();
+  const n = agentDrawings.get(key)?.length ?? 0;
+  agentDrawings.delete(key);
+  return n;
+}

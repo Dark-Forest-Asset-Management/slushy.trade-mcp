@@ -10,8 +10,8 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import { hypaper, resolveAsset } from './hypaper.js';
-import { getSupporterStatus } from './supporter.js';
-import { getChart } from './chart-store.js';
+import { getAccessStatus } from './supporter.js';
+import { getChart, getDrawings } from './chart-store.js';
 import { attachStreams, type SessionStreams } from './streaming.js';
 
 const json = (data: unknown) => ({ content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }] });
@@ -46,8 +46,8 @@ export function buildSession(wallet: string): { server: McpServer; streams: Sess
     async ({ startTime }) => json(await hypaper.info({ type: 'userFunding', user: wallet, startTime: startTime ?? 0 })));
 
   server.registerTool('get_supporter_status',
-    { description: 'Your Active Supporter subscription status (active + expiry).' },
-    async () => json(await getSupporterStatus(wallet)));
+    { description: 'Your MCP access status: supporter subscription (active + expiry) and/or verified-executive flag.' },
+    async () => json(await getAccessStatus(wallet)));
 
   // ── market data (read, public) ──────────────────────────────────────────
   server.registerTool('get_all_mids',
@@ -78,8 +78,16 @@ export function buildSession(wallet: string): { server: McpServer; streams: Sess
     { description: 'The latest chart screenshot (with drawings) the user exported from slushy, returned as an image for visual analysis. Errors if none has been uploaded yet.' },
     async () => {
       const c = getChart(wallet);
-      if (!c) return { isError: true, content: [{ type: 'text' as const, text: 'No chart image uploaded yet — export/send a chart from slushy first.' }] };
+      if (!c) return { isError: true, content: [{ type: 'text' as const, text: 'No chart image pushed yet — use the brain button in slushy first.' }] };
       return { content: [{ type: 'image' as const, data: c.data.toString('base64'), mimeType: c.mimeType }] };
+    });
+
+  server.registerTool('get_chart_drawings',
+    { description: 'The chart drawings (trendlines, annotations, etc.) the user pushed from slushy, as JSON. Errors if none pushed yet.' },
+    async () => {
+      const d = getDrawings(wallet);
+      if (!d) return { isError: true, content: [{ type: 'text' as const, text: 'No drawings pushed yet — use the brain button in slushy first.' }] };
+      return json(d.data);
     });
 
   // ── trading (write) ──────────────────────────────────────────────────────

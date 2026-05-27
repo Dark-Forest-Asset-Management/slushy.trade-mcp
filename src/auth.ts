@@ -12,7 +12,7 @@
  */
 
 import { ethers } from 'ethers';
-import { isActiveSupporter } from './supporter.js';
+import { getAccessStatus } from './supporter.js';
 
 /** The exact message a wallet signs to mint an MCP access token. */
 export function mcpAccessMessage(address: string): string {
@@ -56,17 +56,17 @@ export async function authenticate(authorization: string | undefined): Promise<A
     return { ok: false, status: 401, error: 'Signature does not match address' };
   }
 
-  let active: boolean;
+  let allowed: boolean;
   try {
-    active = await isActiveSupporter(recovered);
+    allowed = (await getAccessStatus(recovered)).allowed;
   } catch (err) {
-    return { ok: false, status: 503, error: `Supporter check failed: ${(err as Error).message}` };
+    return { ok: false, status: 503, error: `Access check failed: ${(err as Error).message}` };
   }
-  if (!active) {
+  if (!allowed) {
     return {
       ok: false,
       status: 402,
-      error: 'No active supporter subscription for this wallet. Subscribe at slushy.trade to unlock MCP access.',
+      error: 'No active supporter subscription or verified-executive access for this wallet. Subscribe at slushy.trade to unlock MCP access.',
     };
   }
   return { ok: true, wallet: recovered.toLowerCase() };

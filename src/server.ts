@@ -16,7 +16,7 @@ import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/
 import { isInitializeRequest } from '@modelcontextprotocol/sdk/types.js';
 import { authenticate } from './auth.js';
 import { buildSession } from './mcp.js';
-import { setChart } from './chart-store.js';
+import { setChart, setDrawings } from './chart-store.js';
 import type { SessionStreams } from './streaming.js';
 import { config } from './config.js';
 
@@ -24,6 +24,22 @@ interface Session { transport: StreamableHTTPServerTransport; streams: SessionSt
 
 export function createApp() {
   const app = express();
+
+  // CORS — the slushy browser frontend POSTs cross-origin (brain button →
+  // /chart + /drawings) and an in-browser MCP client would hit /mcp. No
+  // cookies are used (auth is the Bearer token), so reflecting the origin is
+  // safe. Expose mcp-session-id so a browser MCP client can read it. Preflight
+  // (OPTIONS) is answered here before any body parsing.
+  app.use((req: Request, res: Response, next) => {
+    res.header('Access-Control-Allow-Origin', req.headers.origin ?? '*');
+    res.header('Vary', 'Origin');
+    res.header('Access-Control-Allow-Methods', 'GET, POST, DELETE, OPTIONS');
+    res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization, mcp-session-id, mcp-protocol-version, last-event-id');
+    res.header('Access-Control-Expose-Headers', 'mcp-session-id');
+    if (req.method === 'OPTIONS') { res.sendStatus(204); return; }
+    next();
+  });
+
   app.use(express.json({ limit: '1mb' }));
 
   const sessions = new Map<string, Session>();
@@ -45,6 +61,20 @@ export function createApp() {
     const mimeType = (req.headers['content-type'] ?? 'image/png').split(';')[0].trim();
     setChart(auth.wallet, body, mimeType);
     res.json({ ok: true, bytes: body.length, mimeType });
+  });
+
+  // Chart drawings (vector JSON) push — supporter-gated, cached per wallet for
+  // the `get_chart_drawings` MCP tool. Uses the global JSON parser.
+  app.post('/drawings', async (req: Request, res: Response) => {
+    const auth = await authenticate(req.headers.authorization);
+    if (!auth.ok) { res.status(auth.status).json({ error: auth.error }); return; }
+    const body = req.body;
+    if (body == null || typeof body !== 'object') {
+      res.status(400).json({ error: 'POST a JSON body with the drawings.' });
+      return;
+    }
+    setDrawings(auth.wallet, body);
+    res.json({ ok: true });
   });
 
   app.post('/mcp', async (req: Request, res: Response) => {

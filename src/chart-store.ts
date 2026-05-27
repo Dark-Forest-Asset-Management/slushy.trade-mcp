@@ -24,3 +24,21 @@ export function setChart(wallet: string, data: Buffer, mimeType: string): void {
 export function getChart(wallet: string): ChartEntry | undefined {
   return store.get(wallet.toLowerCase());
 }
+
+// ── drawings (vector JSON pushed alongside the PNG) ──────────────────────
+interface DrawingsEntry { data: unknown; at: number; }
+const drawings = new Map<string, DrawingsEntry>();
+
+export function setDrawings(wallet: string, data: unknown): void {
+  drawings.set(wallet.toLowerCase(), { data, at: Date.now() });
+  if (drawings.size > MAX_WALLETS) {
+    let oldestKey: string | null = null;
+    let oldest = Infinity;
+    for (const [k, v] of drawings) if (v.at < oldest) { oldest = v.at; oldestKey = k; }
+    if (oldestKey) drawings.delete(oldestKey);
+  }
+}
+
+export function getDrawings(wallet: string): DrawingsEntry | undefined {
+  return drawings.get(wallet.toLowerCase());
+}

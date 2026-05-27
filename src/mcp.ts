@@ -93,21 +93,35 @@ export function buildSession(wallet: string): { server: McpServer; streams: Sess
   // ── trading (write) ──────────────────────────────────────────────────────
   server.registerTool('place_order',
     {
-      description: 'Place a perp order on your paper account. Limit by default; set tif=Ioc for market-like immediate-or-cancel. For TP/SL pass trigger fields.',
+      description: 'Place a perp order. Limit by default; tif=Ioc for market-like. Pass takeProfitPx and/or stopLossPx to submit a LINKED OCO BRACKET (entry + TP + SL as one normalTpsl group) exactly like the slushy trading panel — HyPaper wires the OCO so the surviving leg auto-cancels when one fills, and cascades on entry cancel. Or pass `trigger` for a standalone stop/TP order.',
       inputSchema: {
         coin: z.string().describe('e.g. BTC'),
         isBuy: z.boolean(),
         size: z.string().describe('base-asset size, decimal string'),
-        price: z.string().describe('limit price, decimal string'),
+        price: z.string().describe('entry/limit price (for a market entry use tif=Ioc with a crossing price)'),
         tif: z.enum(['Gtc', 'Ioc', 'Alo']).optional().describe('default Gtc'),
         reduceOnly: z.boolean().optional(),
+        takeProfitPx: z.string().optional().describe('TP trigger price → adds a reduceOnly OCO take-profit child'),
+        stopLossPx: z.string().optional().describe('SL trigger price → adds a reduceOnly OCO stop-loss child'),
         trigger: z.object({
           triggerPx: z.string(), isMarket: z.boolean(), tpsl: z.enum(['tp', 'sl']),
-        }).optional().describe('present → trigger (TP/SL) order'),
+        }).optional().describe('standalone trigger order; ignored when takeProfitPx/stopLossPx are given'),
       },
     },
-    async ({ coin, isBuy, size, price, tif, reduceOnly, trigger }) => {
+    async ({ coin, isBuy, size, price, tif, reduceOnly, takeProfitPx, stopLossPx, trigger }) => {
       const a = await resolveAsset(coin);
+
+      // OCO bracket — mirrors the slushy trading panel: entry first, then
+      // opposite-side reduceOnly isMarket TP/SL trigger children, grouping
+      // normalTpsl. HyPaper links them so one fill cancels the sibling.
+      if (takeProfitPx || stopLossPx) {
+        const entry = { a, b: isBuy, p: price, s: size, r: reduceOnly ?? false, t: { limit: { tif: tif ?? 'Gtc' } } };
+        const orders: object[] = [entry];
+        if (takeProfitPx) orders.push({ a, b: !isBuy, p: takeProfitPx, s: size, r: true, t: { trigger: { triggerPx: takeProfitPx, isMarket: true, tpsl: 'tp' } } });
+        if (stopLossPx) orders.push({ a, b: !isBuy, p: stopLossPx, s: size, r: true, t: { trigger: { triggerPx: stopLossPx, isMarket: true, tpsl: 'sl' } } });
+        return json(await hypaper.exchange(wallet, { type: 'order', grouping: 'normalTpsl', orders }));
+      }
+
       const t = trigger ? { trigger } : { limit: { tif: tif ?? 'Gtc' } };
       const order = { a, b: isBuy, p: price, s: size, r: reduceOnly ?? false, t };
       return json(await hypaper.exchange(wallet, { type: 'order', grouping: 'na', orders: [order] }));

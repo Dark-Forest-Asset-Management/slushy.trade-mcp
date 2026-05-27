@@ -66,3 +66,19 @@ export function clearAgentDrawings(wallet: string): number {
   agentDrawings.delete(key);
   return n;
 }
+
+// Opt-in "clear the USER's own drawings" command. A monotonic counter per
+// wallet; the slushy poll clears the user's drawings once when it sees the
+// counter increase. Destructive, so only bumped when explicitly requested.
+const clearUserSignal = new Map<string, number>();
+
+export function bumpClearUserDrawings(wallet: string): number {
+  const key = wallet.toLowerCase();
+  const next = (clearUserSignal.get(key) ?? 0) + 1;
+  clearUserSignal.set(key, next);
+  return next;
+}
+
+export function getClearUserSignal(wallet: string): number {
+  return clearUserSignal.get(wallet.toLowerCase()) ?? 0;
+}

@@ -23,6 +23,7 @@
 import WebSocket from 'ws';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { ResourceTemplate } from '@modelcontextprotocol/sdk/server/mcp.js';
+import { SubscribeRequestSchema, UnsubscribeRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 import { config } from './config.js';
 
 interface FeedKey { uri: string; sub: object; }
@@ -77,8 +78,9 @@ export class SessionStreams {
     }
   }
 
-  /** Subscribe upstream for a given resource uri the first time it's needed. */
-  private async subscribeUpstream(uri: string): Promise<void> {
+  /** Subscribe upstream (to HyPaper) for a given resource uri the first time
+   *  it's needed. Idempotent. Called on resources/subscribe AND on read. */
+  async subscribeUpstream(uri: string): Promise<void> {
     if (this.active.has(uri)) return;
     const sub = this.subForUri(uri);
     if (!sub) return;
@@ -138,6 +140,16 @@ export function attachStreams(server: McpServer, wallet: string): SessionStreams
   server.registerResource('trades', new ResourceTemplate('slushy://trades/{coin}', { list: undefined }),
     { description: 'Live trades for {coin}.', mimeType: 'application/json' },
     async (uri) => text(uri.href, await streams.read(uri.href)));
+
+  // The high-level McpServer doesn't auto-handle resources/subscribe even with
+  // the capability declared, so wire it on the low-level server: a subscribe
+  // starts the upstream HyPaper feed (so updates flow without a prior read),
+  // and returns an empty result so the handshake succeeds.
+  server.server.setRequestHandler(SubscribeRequestSchema, async (req) => {
+    await streams.subscribeUpstream(req.params.uri).catch(() => {});
+    return {};
+  });
+  server.server.setRequestHandler(UnsubscribeRequestSchema, async () => ({}));
 
   return streams;
 }

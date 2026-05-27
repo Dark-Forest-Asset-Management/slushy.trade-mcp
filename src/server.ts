@@ -16,7 +16,7 @@ import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/
 import { isInitializeRequest } from '@modelcontextprotocol/sdk/types.js';
 import { authenticate } from './auth.js';
 import { buildSession } from './mcp.js';
-import { setChart, setDrawings, getAgentDrawings } from './chart-store.js';
+import { setChart, setDrawings, getAgentDrawings, getClearUserSignal } from './chart-store.js';
 import type { SessionStreams } from './streaming.js';
 import { config } from './config.js';
 
@@ -82,7 +82,7 @@ export function createApp() {
   app.get('/agent-drawings', async (req: Request, res: Response) => {
     const auth = await authenticate(req.headers.authorization);
     if (!auth.ok) { res.status(auth.status).json({ error: auth.error }); return; }
-    res.json({ drawings: getAgentDrawings(auth.wallet) });
+    res.json({ drawings: getAgentDrawings(auth.wallet), clearUserSignal: getClearUserSignal(auth.wallet) });
   });
 
   app.post('/mcp', async (req: Request, res: Response) => {

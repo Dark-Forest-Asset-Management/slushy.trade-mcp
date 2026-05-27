@@ -11,7 +11,7 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import { hypaper, resolveAsset } from './hypaper.js';
 import { getAccessStatus } from './supporter.js';
-import { getChart, getDrawings, addAgentDrawing, clearAgentDrawings } from './chart-store.js';
+import { getChart, getDrawings, addAgentDrawing, clearAgentDrawings, bumpClearUserDrawings } from './chart-store.js';
 import { attachStreams, type SessionStreams } from './streaming.js';
 
 const json = (data: unknown) => ({ content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }] });
@@ -48,6 +48,22 @@ export function buildSession(wallet: string): { server: McpServer; streams: Sess
   server.registerTool('get_funding_history',
     { description: 'Funding payments applied to your positions.', inputSchema: { startTime: z.number().int().optional() } },
     async ({ startTime }) => json(await hypaper.info({ type: 'userFunding', user: wallet, startTime: startTime ?? 0 })));
+
+  server.registerTool('get_ledger',
+    { description: 'Non-funding balance changes (deposits / withdrawals / transfers).', inputSchema: { startTime: z.number().int().optional() } },
+    async ({ startTime }) => json(await hypaper.info({ type: 'userNonFundingLedgerUpdates', user: wallet, startTime: startTime ?? 0 })));
+
+  server.registerTool('get_fees',
+    { description: 'Your fee schedule + daily volume + maker/taker rates.' },
+    async () => json(await hypaper.info({ type: 'userFees', user: wallet })));
+
+  server.registerTool('get_predicted_fundings',
+    { description: 'Predicted next funding rates per coin/venue.' },
+    async () => json(await hypaper.info({ type: 'predictedFundings' })));
+
+  server.registerTool('get_spot_balances',
+    { description: 'Your spot balances (spotClearinghouseState). Note: HyPaper spot support is limited.' },
+    async () => json(await hypaper.info({ type: 'spotClearinghouseState', user: wallet })));
 
   server.registerTool('get_supporter_status',
     { description: 'Your MCP access status: supporter subscription (active + expiry) and/or verified-executive flag.' },
@@ -115,6 +131,10 @@ export function buildSession(wallet: string): { server: McpServer; streams: Sess
     async ({ type, anchors, color, label }) => {
       const c = color ?? '#22d3ee';
       const drawing = {
+        // `ai-` id namespace: the slushy chart renders these but EXCLUDES
+        // them from the user's saved snapshot (isAutoOverlayId). Stable id so
+        // re-polls replace rather than duplicate.
+        id: `ai-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
         type, anchors,
         style: { lineColor: c, lineWidth: 2, lineDash: [], fillColor: c + '33', fillOpacity: 0.1, showLabels: true, labelFont: '12px sans-serif', labelColor: c },
         options: { visible: true, locked: false, zIndex: 0 },
@@ -124,8 +144,15 @@ export function buildSession(wallet: string): { server: McpServer; streams: Sess
     });
 
   server.registerTool('clear_chart_drawings',
-    { description: "Clear all AI-authored drawings for this wallet (the agent-drawings buffer the slushy chart renders). Does NOT touch the user's own drawings." },
-    async () => json({ ok: true, cleared: clearAgentDrawings(wallet) }));
+    {
+      description: "Clear AI-authored drawings for this wallet (the agent-drawings buffer the slushy chart renders). Set includeUserDrawings=true to ALSO clear the user's own chart drawings (destructive — only on explicit request).",
+      inputSchema: { includeUserDrawings: z.boolean().optional() },
+    },
+    async ({ includeUserDrawings }) => json({
+      ok: true,
+      clearedAgentDrawings: clearAgentDrawings(wallet),
+      clearedUserDrawings: includeUserDrawings ? (bumpClearUserDrawings(wallet), true) : false,
+    }));
 
   // ── trading (write) ──────────────────────────────────────────────────────
   server.registerTool('place_order',
@@ -236,6 +263,13 @@ export function buildSession(wallet: string): { server: McpServer; streams: Sess
     async ({ coin, oid }) => {
       const a = await resolveAsset(coin);
       return json(await hypaper.exchange(wallet, { type: 'cancel', cancels: [{ a, o: oid }] }));
+    });
+
+  server.registerTool('cancel_by_cloid',
+    { description: 'Cancel an order by its client order id (cloid, 0x-prefixed 16-byte hex).', inputSchema: { coin: z.string(), cloid: z.string() } },
+    async ({ coin, cloid }) => {
+      const asset = await resolveAsset(coin);
+      return json(await hypaper.exchange(wallet, { type: 'cancelByCloid', cancels: [{ asset, cloid }] }));
     });
 
   server.registerTool('cancel_all_orders',

@@ -120,21 +120,23 @@ export function buildSession(wallet: string): { server: McpServer; streams: Sess
 
   server.registerTool('add_chart_drawing',
     {
-      description: "Add an AI-authored drawing to the user's chart (trend-line, horizontal-line, fib-retracement, or text). Stored server-side; the slushy chart polls GET /agent-drawings and renders them. anchors are {time: unix SECONDS, price}.",
+      description: "Add an AI-authored drawing to the user's chart (trend-line, horizontal-line, fib-retracement, or text). Stored server-side; the slushy chart polls GET /agent-drawings and renders ONLY the drawings whose `coin` matches the market the user is viewing. anchors are {time: unix SECONDS, price}.",
       inputSchema: {
+        coin: z.string().describe('the market this drawing belongs to (e.g. BTC, XRP, xyz:CRWV) — it only renders on that chart'),
         type: z.enum(['trend-line', 'horizontal-line', 'fib-retracement', 'text']),
         anchors: z.array(z.object({ time: z.number(), price: z.number() })).min(1),
         color: z.string().optional().describe('hex, e.g. #22d3ee'),
         label: z.string().optional().describe('text for type=text, or a label'),
       },
     },
-    async ({ type, anchors, color, label }) => {
+    async ({ coin, type, anchors, color, label }) => {
       const c = color ?? '#22d3ee';
       const drawing = {
         // `ai-` id namespace: the slushy chart renders these but EXCLUDES
         // them from the user's saved snapshot (isAutoOverlayId). Stable id so
-        // re-polls replace rather than duplicate.
+        // re-polls replace rather than duplicate. `coin` scopes it to one market.
         id: `ai-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+        coin,
         type, anchors,
         style: { lineColor: c, lineWidth: 2, lineDash: [], fillColor: c + '33', fillOpacity: 0.1, showLabels: true, labelFont: '12px sans-serif', labelColor: c },
         options: { visible: true, locked: false, zIndex: 0 },
@@ -271,6 +273,27 @@ export function buildSession(wallet: string): { server: McpServer; streams: Sess
       const asset = await resolveAsset(coin);
       return json(await hypaper.exchange(wallet, { type: 'cancelByCloid', cancels: [{ asset, cloid }] }));
     });
+
+  // ── stubs: wired to the real HL actions, but HyPaper doesn't implement them
+  // yet. They pass through and will start working the moment the backend adds
+  // the action (no MCP change needed) — until then HyPaper returns
+  // "Unsupported action type". Kept registered so the surface is complete.
+  server.registerTool('update_isolated_margin',
+    {
+      description: 'Add/remove isolated margin on a coin. ntli = USD in 6-dp units (1000000 = $1); + adds, − removes. STUB: requires HyPaper updateIsolatedMargin support (in progress) — errors until then.',
+      inputSchema: { coin: z.string(), isBuy: z.boolean(), ntli: z.number().int() },
+    },
+    async ({ coin, isBuy, ntli }) => {
+      const asset = await resolveAsset(coin);
+      return json(await hypaper.exchange(wallet, { type: 'updateIsolatedMargin', asset, isBuy, ntli }));
+    });
+
+  server.registerTool('schedule_cancel',
+    {
+      description: "Dead-man's switch: cancel all open orders at `time` (unix ms) unless refreshed; omit time to clear. STUB: requires HyPaper scheduleCancel support (in progress) — errors until then.",
+      inputSchema: { time: z.number().int().optional() },
+    },
+    async ({ time }) => json(await hypaper.exchange(wallet, time !== undefined ? { type: 'scheduleCancel', time } : { type: 'scheduleCancel' })));
 
   server.registerTool('cancel_all_orders',
     { description: 'Cancel all of your resting open orders.' },

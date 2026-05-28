@@ -17,6 +17,7 @@ import { isInitializeRequest } from '@modelcontextprotocol/sdk/types.js';
 import { authenticate } from './auth.js';
 import * as oauth from './oauth.js';
 import { buildSession } from './mcp.js';
+import { streamChat, type ChatMessage, type ChatProvider } from './chat.js';
 import { setChart, setDrawings, getAgentDrawings, getClearUserSignal } from './chart-store.js';
 import type { SessionStreams } from './streaming.js';
 import { config } from './config.js';
@@ -142,6 +143,56 @@ export function createApp() {
     const auth = await authenticate(req.headers.authorization);
     if (!auth.ok) { res.status(auth.status).json({ error: auth.error }); return; }
     res.json({ drawings: getAgentDrawings(auth.wallet), clearUserSignal: getClearUserSignal(auth.wallet) });
+  });
+
+  // In-app chat (SSE). Supporter-gated by the same Bearer token, which also
+  // doubles as the MCP credential the chosen provider uses to reach /mcp. The
+  // BYO LLM key (body.apiKey) is used once and never logged or stored.
+  app.post('/chat', async (req: Request, res: Response) => {
+    const auth = await authenticate(req.headers.authorization);
+    if (!auth.ok) { res.status(auth.status).json({ error: auth.error }); return; }
+
+    const body = (req.body ?? {}) as {
+      provider?: string; model?: string; apiKey?: string; messages?: unknown;
+    };
+    const provider = body.provider as ChatProvider;
+    if (provider !== 'anthropic' && provider !== 'openai' && provider !== 'gemini') {
+      res.status(400).json({ error: 'provider must be anthropic | openai | gemini' }); return;
+    }
+    if (!body.model || typeof body.model !== 'string') { res.status(400).json({ error: 'model is required' }); return; }
+    if (!body.apiKey || typeof body.apiKey !== 'string') { res.status(400).json({ error: 'apiKey is required (bring your own key)' }); return; }
+    const messages: ChatMessage[] = Array.isArray(body.messages)
+      ? (body.messages as ChatMessage[]).filter((m) => m && (m.role === 'user' || m.role === 'assistant') && typeof m.content === 'string')
+      : [];
+    if (messages.length === 0) { res.status(400).json({ error: 'messages must be a non-empty array' }); return; }
+
+    // Same token the client authenticated with — re-used as the MCP credential
+    // the provider presents back to /mcp (no "Bearer" prefix for the connectors).
+    const mcpToken = (req.headers.authorization ?? '').replace(/^Bearer\s+/i, '').trim();
+
+    res.setHeader('Content-Type', 'text/event-stream');
+    res.setHeader('Cache-Control', 'no-cache, no-transform');
+    res.setHeader('Connection', 'keep-alive');
+    res.setHeader('X-Accel-Buffering', 'no'); // disable nginx proxy buffering
+    (res as Response & { flushHeaders?: () => void }).flushHeaders?.();
+    const send = (obj: unknown) => res.write(`data: ${JSON.stringify(obj)}\n\n`);
+
+    try {
+      await streamChat(
+        { provider, model: body.model, apiKey: body.apiKey, messages, mcpToken },
+        {
+          text: (t) => send({ type: 'text', text: t }),
+          tool: (name) => send({ type: 'tool', name }),
+          error: (msg) => send({ type: 'error', error: msg }),
+        },
+      );
+      send({ type: 'done' });
+    } catch (e) {
+      // Surface the provider/model error to the panel (e.g. bad key, bad model).
+      send({ type: 'error', error: (e as Error).message || 'chat failed' });
+    } finally {
+      res.end();
+    }
   });
 
   app.post('/mcp', async (req: Request, res: Response) => {

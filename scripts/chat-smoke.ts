@@ -43,17 +43,27 @@ async function mintToken(pk: string): Promise<string> {
   return Buffer.from(JSON.stringify({ address: wallet.address, signature }), 'utf8').toString('base64url');
 }
 
+/** Infer the provider from the key prefix (Anthropic sk-ant-, Gemini AIza, else
+ *  OpenAI sk-). PROVIDER env overrides. */
+function inferProvider(apiKey: string): string | null {
+  if (apiKey.startsWith('sk-ant-')) return 'anthropic';
+  if (apiKey.startsWith('AIza')) return 'gemini';
+  if (apiKey.startsWith('sk-')) return 'openai';
+  return null;
+}
+
 (async () => {
   const base = (process.env.MCP_URL ?? 'http://localhost:8788').replace(/\/$/, '');
-  const provider = (process.env.PROVIDER ?? 'anthropic').toLowerCase();
-  const model = process.env.MODEL ?? DEFAULT_MODELS[provider];
   const apiKey = process.env.LLM_KEY;
-  const message = process.argv.slice(2).join(' ') || 'What is my account balance and current positions?';
-
-  if (!['anthropic', 'openai', 'gemini'].includes(provider)) {
-    console.error(`PROVIDER must be anthropic | openai | gemini (got "${provider}")`); process.exit(1);
-  }
   if (!apiKey) { console.error('Set LLM_KEY=<your provider API key>'); process.exit(1); }
+
+  // Explicit PROVIDER wins; otherwise infer it from the key.
+  const provider = (process.env.PROVIDER?.toLowerCase() || inferProvider(apiKey) || '');
+  if (!['anthropic', 'openai', 'gemini'].includes(provider)) {
+    console.error(`Could not infer provider from the key — set PROVIDER=anthropic | openai | gemini (got "${provider}")`); process.exit(1);
+  }
+  const model = process.env.MODEL ?? DEFAULT_MODELS[provider];
+  const message = process.argv.slice(2).join(' ') || 'What is my account balance and current positions?';
   if (!model) { console.error('Set MODEL=<provider model>'); process.exit(1); }
 
   let token = process.env.TOKEN;

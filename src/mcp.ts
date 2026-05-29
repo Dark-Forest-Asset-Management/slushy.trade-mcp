@@ -9,7 +9,8 @@
 
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
-import { hypaper, resolveAsset } from './hypaper.js';
+import { hypaper, resolveAsset, getSzDecimals } from './hypaper.js';
+import { priceToWire, sizeToWire } from './precision.js';
 import { getAccessStatus } from './supporter.js';
 import { getChart, getDrawings, addAgentDrawing, clearAgentDrawings, bumpClearUserDrawings } from './chart-store.js';
 import { attachStreams, type SessionStreams } from './streaming.js';
@@ -178,6 +179,11 @@ export function buildSession(wallet: string): { server: McpServer; streams: Sess
     },
     async ({ coin, isBuy, size, price, tif, reduceOnly, takeProfitPx, stopLossPx, trigger, leverage, cross }) => {
       const a = await resolveAsset(coin);
+      // Snap price + size to the asset's tick/lot grid (HL rejects malformed
+      // precision). The agent passes human numbers; we canonicalize them.
+      const sd = await getSzDecimals(coin);
+      const p = priceToWire(Number(price), sd);
+      const s = sizeToWire(Number(size), sd);
       // Set leverage deliberately when asked, so a position isn't opened at
       // the account's default (e.g. 20x) by accident.
       if (leverage) await hypaper.exchange(wallet, { type: 'updateLeverage', asset: a, isCross: cross ?? true, leverage });
@@ -186,15 +192,17 @@ export function buildSession(wallet: string): { server: McpServer; streams: Sess
       // opposite-side reduceOnly isMarket TP/SL trigger children, grouping
       // normalTpsl. HyPaper links them so one fill cancels the sibling.
       if (takeProfitPx || stopLossPx) {
-        const entry = { a, b: isBuy, p: price, s: size, r: reduceOnly ?? false, t: { limit: { tif: tif ?? 'Gtc' } } };
+        const entry = { a, b: isBuy, p, s, r: reduceOnly ?? false, t: { limit: { tif: tif ?? 'Gtc' } } };
         const orders: object[] = [entry];
-        if (takeProfitPx) orders.push({ a, b: !isBuy, p: takeProfitPx, s: size, r: true, t: { trigger: { triggerPx: takeProfitPx, isMarket: true, tpsl: 'tp' } } });
-        if (stopLossPx) orders.push({ a, b: !isBuy, p: stopLossPx, s: size, r: true, t: { trigger: { triggerPx: stopLossPx, isMarket: true, tpsl: 'sl' } } });
+        if (takeProfitPx) { const tp = priceToWire(Number(takeProfitPx), sd); orders.push({ a, b: !isBuy, p: tp, s, r: true, t: { trigger: { triggerPx: tp, isMarket: true, tpsl: 'tp' } } }); }
+        if (stopLossPx) { const sl = priceToWire(Number(stopLossPx), sd); orders.push({ a, b: !isBuy, p: sl, s, r: true, t: { trigger: { triggerPx: sl, isMarket: true, tpsl: 'sl' } } }); }
         return json(await hypaper.exchange(wallet, { type: 'order', grouping: 'normalTpsl', orders }));
       }
 
-      const t = trigger ? { trigger } : { limit: { tif: tif ?? 'Gtc' } };
-      const order = { a, b: isBuy, p: price, s: size, r: reduceOnly ?? false, t };
+      const t = trigger
+        ? { trigger: { triggerPx: priceToWire(Number(trigger.triggerPx), sd), isMarket: trigger.isMarket, tpsl: trigger.tpsl } }
+        : { limit: { tif: tif ?? 'Gtc' } };
+      const order = { a, b: isBuy, p, s, r: reduceOnly ?? false, t };
       return json(await hypaper.exchange(wallet, { type: 'order', grouping: 'na', orders: [order] }));
     });
 
@@ -211,8 +219,13 @@ export function buildSession(wallet: string): { server: McpServer; streams: Sess
     },
     async ({ coin, oid, isBuy, size, price, tif, reduceOnly, trigger }) => {
       const a = await resolveAsset(coin);
-      const t = trigger ? { trigger } : { limit: { tif: tif ?? 'Gtc' } };
-      const order = { a, b: isBuy, p: price, s: size, r: reduceOnly ?? false, t };
+      const sd = await getSzDecimals(coin);
+      const p = priceToWire(Number(price), sd);
+      const s = sizeToWire(Number(size), sd);
+      const t = trigger
+        ? { trigger: { triggerPx: priceToWire(Number(trigger.triggerPx), sd), isMarket: trigger.isMarket, tpsl: trigger.tpsl } }
+        : { limit: { tif: tif ?? 'Gtc' } };
+      const order = { a, b: isBuy, p, s, r: reduceOnly ?? false, t };
       void a; // asset resolved for validation/symmetry; modify keys off oid
       return json(await hypaper.exchange(wallet, { type: 'modify', oid, order }));
     });
@@ -229,12 +242,13 @@ export function buildSession(wallet: string): { server: McpServer; streams: Sess
     async ({ coin, takeProfitPx, stopLossPx }) => {
       if (!takeProfitPx && !stopLossPx) return fail('Provide takeProfitPx and/or stopLossPx.');
       const a = await resolveAsset(coin);
+      const sd = await getSzDecimals(coin);
 
       const state = await hypaper.info({ type: 'clearinghouseState', user: wallet }) as
         { assetPositions: Array<{ position: { coin: string; szi: string } }> };
       const pos = state.assetPositions.find((p) => p.position.coin === coin)?.position;
       if (!pos || Number(pos.szi) === 0) return fail(`No open ${coin} position to bracket.`);
-      const size = Math.abs(Number(pos.szi)).toString();
+      const size = sizeToWire(Math.abs(Number(pos.szi)), sd);
       const closeIsBuy = Number(pos.szi) < 0; // closing side is opposite the position
 
       // Existing reduceOnly trigger legs for this coin, classified by HL's
@@ -247,7 +261,8 @@ export function buildSession(wallet: string): { server: McpServer; streams: Sess
 
       // Modify the leg IN PLACE if it exists (preserves its place in the
       // bracket — same as the chart's drag/pencil); otherwise add it.
-      const setLeg = async (px: string, tpsl: 'tp' | 'sl', existingOid?: number) => {
+      const setLeg = async (rawPx: string, tpsl: 'tp' | 'sl', existingOid?: number) => {
+        const px = priceToWire(Number(rawPx), sd);
         const order = { a, b: closeIsBuy, p: px, s: size, r: true, t: { trigger: { triggerPx: px, isMarket: true, tpsl } } };
         return existingOid !== undefined
           ? hypaper.exchange(wallet, { type: 'modify', oid: existingOid, order })
@@ -322,13 +337,14 @@ export function buildSession(wallet: string): { server: McpServer; streams: Sess
     },
     async ({ coin, size }) => {
       const a = await resolveAsset(coin);
+      const sd = await getSzDecimals(coin);
       const state = await hypaper.info({ type: 'clearinghouseState', user: wallet }) as
         { assetPositions: Array<{ position: { coin: string; szi: string } }> };
       const pos = state.assetPositions.find((p) => p.position.coin === coin)?.position;
       if (!pos || Number(pos.szi) === 0) return fail(`No open ${coin} position to close.`);
       const szi = Number(pos.szi);
       const closeIsBuy = szi < 0;                 // buy to close a short, sell to close a long
-      const closeSz = size ?? Math.abs(szi).toString();
+      const closeSz = size ? sizeToWire(Number(size), sd) : sizeToWire(Math.abs(szi), sd);
 
       // Cancel the position's protective bracket first — otherwise the TP/SL
       // triggers linger as dangling reduceOnly orders after we flatten.
@@ -339,7 +355,7 @@ export function buildSession(wallet: string): { server: McpServer; streams: Sess
 
       const mid = Number((await hypaper.info({ type: 'allMids' }))[coin] ?? 0);
       // IOC across the book: cross aggressively in the close direction.
-      const px = (closeIsBuy ? mid * 1.05 : mid * 0.95).toFixed(6);
+      const px = priceToWire(closeIsBuy ? mid * 1.05 : mid * 0.95, sd);
       const order = { a, b: closeIsBuy, p: px, s: closeSz, r: true, t: { limit: { tif: 'Ioc' } } };
       const close = await hypaper.exchange(wallet, { type: 'order', grouping: 'na', orders: [order] });
       return json({ cancelledBracket: triggers.map((o) => o.oid), close });
@@ -355,7 +371,8 @@ export function buildSession(wallet: string): { server: McpServer; streams: Sess
     },
     async ({ coin, isBuy, size, minutes, reduceOnly, randomize }) => {
       const a = await resolveAsset(coin);
-      return json(await hypaper.exchange(wallet, { type: 'twapOrder', twap: { a, b: isBuy, s: size, r: reduceOnly ?? false, m: minutes, t: randomize ?? false } }));
+      const s = sizeToWire(Number(size), await getSzDecimals(coin));
+      return json(await hypaper.exchange(wallet, { type: 'twapOrder', twap: { a, b: isBuy, s, r: reduceOnly ?? false, m: minutes, t: randomize ?? false } }));
     });
 
   server.registerTool('cancel_twap',

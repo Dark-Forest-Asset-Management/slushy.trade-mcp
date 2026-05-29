@@ -34,6 +34,22 @@ export const hypaper = {
   admin: (body: object) => post('/hypaper', body),
 };
 
+/** POST to REAL Hyperliquid's /info — for LIVE-mode user reads (account,
+ *  positions, orders, fills) keyed by the wallet address. Public, no auth.
+ *  Same request shape as HyPaper's /info (HyPaper mirrors the HL info API). */
+export async function hlLiveInfo(body: object): Promise<any> {
+  const r = await fetch(`${config.hlInfoUrl}/info`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  const text = await r.text();
+  let json: any;
+  try { json = JSON.parse(text); } catch { throw new Error(`HL /info non-JSON (HTTP ${r.status}): ${text.slice(0, 200)}`); }
+  if (!r.ok) throw new Error(`HL /info HTTP ${r.status}: ${typeof json === 'object' ? JSON.stringify(json) : text}`);
+  return json;
+}
+
 // ── coin → asset index resolution (cached) ──────────────────────────────
 // HL/HyPaper order wires use a numeric asset index, but humans say "BTC".
 // `meta.universe[i].name` → i. Cached for a minute.

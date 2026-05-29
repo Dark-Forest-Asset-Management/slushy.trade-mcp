@@ -9,62 +9,98 @@
 
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
-import { hypaper, resolveAsset, getSzDecimals } from './hypaper.js';
+import { hypaper, hlLiveInfo, resolveAsset, getSzDecimals } from './hypaper.js';
 import { priceToWire, sizeToWire } from './precision.js';
 import { getAccessStatus } from './supporter.js';
 import { getChart, getDrawings, addAgentDrawing, clearAgentDrawings, bumpClearUserDrawings } from './chart-store.js';
 import { attachStreams, type SessionStreams } from './streaming.js';
+import { queueLiveOrder } from './live-orders.js';
 
 const json = (data: unknown) => ({ content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }] });
 const fail = (msg: string) => ({ isError: true, content: [{ type: 'text' as const, text: msg }] });
 
-export function buildSession(wallet: string): { server: McpServer; streams: SessionStreams } {
+export type SessionMode = 'live' | 'paper';
+
+export function buildSession(wallet: string, mode: SessionMode = 'paper'): { server: McpServer; streams: SessionStreams } {
   const server = new McpServer(
     { name: 'slushy.trade', version: '0.1.0' },
     { capabilities: { tools: {}, resources: { subscribe: true, listChanged: true } } },
   );
 
+  // Mode-aware backends. In LIVE mode, user-scoped reads (carrying a `user`
+  // field) hit REAL Hyperliquid so the agent sees the live account; market
+  // data (no `user`) stays on HyPaper, which mirrors HL. Writes are BLOCKED in
+  // live mode for now — live order signing happens client-side in the slushy
+  // chat panel (Part B, not yet wired), so we must never silently route a
+  // "live" order to the paper book.
+  const rawInfo = hypaper.info;
+  const rawExchange = hypaper.exchange;
+  const info = (body: { type: string; user?: string } & Record<string, unknown>) =>
+    (mode === 'live' && body.user) ? hlLiveInfo(body) : rawInfo(body);
+  // LIVE: the server holds no key, so QUEUE the operation's unsigned action(s)
+  // as one pending order + return a confirm payload (the slushy browser signs +
+  // submits to real HL after the user approves). PAPER: returns null, so each
+  // caller falls through to its ORIGINAL HyPaper execution + return shape —
+  // keeping paper-mode trading byte-identical to before live mode existed.
+  const queueLive = (summary: string, ...actions: object[]) => {
+    if (mode !== 'live') return null;
+    const { id, pending } = queueLiveOrder(wallet, summary, actions);
+    return {
+      status: 'pending_confirmation',
+      pendingId: id,
+      pendingCount: pending,
+      summary,
+      message: `LIVE order queued — it will NOT execute until you approve it on slushy.trade. Open slushy and confirm or deny "${summary}" (it appears in the chat panel).`,
+    };
+  };
+  // Single-action tools: queue-on-live, else execute + return the result
+  // verbatim (identical to the pre-live behavior).
+  const submit = async (summary: string, action: object) => {
+    const q = queueLive(summary, action);
+    return q ?? rawExchange(wallet, action);
+  };
+
   // ── account / info (read) ──────────────────────────────────────────────
   server.registerTool('get_account',
     { description: 'Your paper account: positions, margin summary, account value, withdrawable.' },
-    async () => json(await hypaper.info({ type: 'clearinghouseState', user: wallet })));
+    async () => json(await info({ type: 'clearinghouseState', user: wallet })));
 
   server.registerTool('get_open_orders',
     { description: 'Your resting open orders (with trigger/TP-SL detail).' },
-    async () => json(await hypaper.info({ type: 'frontendOpenOrders', user: wallet })));
+    async () => json(await info({ type: 'frontendOpenOrders', user: wallet })));
 
   server.registerTool('get_fills',
     { description: 'Your recent fills.', inputSchema: { startTime: z.number().int().optional().describe('ms epoch; omit for recent') } },
-    async ({ startTime }) => json(await hypaper.info(
+    async ({ startTime }) => json(await info(
       startTime !== undefined ? { type: 'userFillsByTime', user: wallet, startTime } : { type: 'userFills', user: wallet })));
 
   server.registerTool('get_portfolio',
     { description: 'Account-value / PnL history across day/week/month/allTime (+ perp variants).' },
-    async () => json(await hypaper.info({ type: 'portfolio', user: wallet })));
+    async () => json(await info({ type: 'portfolio', user: wallet })));
 
   server.registerTool('get_order_history',
     { description: 'Your historical orders (filled / canceled / triggered), most recent first.', inputSchema: { limit: z.number().int().optional().describe('default 200') } },
-    async ({ limit }) => json(await hypaper.info({ type: 'historicalOrders', user: wallet, limit: limit ?? 200 })));
+    async ({ limit }) => json(await info({ type: 'historicalOrders', user: wallet, limit: limit ?? 200 })));
 
   server.registerTool('get_funding_history',
     { description: 'Funding payments applied to your positions.', inputSchema: { startTime: z.number().int().optional() } },
-    async ({ startTime }) => json(await hypaper.info({ type: 'userFunding', user: wallet, startTime: startTime ?? 0 })));
+    async ({ startTime }) => json(await info({ type: 'userFunding', user: wallet, startTime: startTime ?? 0 })));
 
   server.registerTool('get_ledger',
     { description: 'Non-funding balance changes (deposits / withdrawals / transfers).', inputSchema: { startTime: z.number().int().optional() } },
-    async ({ startTime }) => json(await hypaper.info({ type: 'userNonFundingLedgerUpdates', user: wallet, startTime: startTime ?? 0 })));
+    async ({ startTime }) => json(await info({ type: 'userNonFundingLedgerUpdates', user: wallet, startTime: startTime ?? 0 })));
 
   server.registerTool('get_fees',
     { description: 'Your fee schedule + daily volume + maker/taker rates.' },
-    async () => json(await hypaper.info({ type: 'userFees', user: wallet })));
+    async () => json(await info({ type: 'userFees', user: wallet })));
 
   server.registerTool('get_predicted_fundings',
     { description: 'Predicted next funding rates per coin/venue.' },
-    async () => json(await hypaper.info({ type: 'predictedFundings' })));
+    async () => json(await info({ type: 'predictedFundings' })));
 
   server.registerTool('get_spot_balances',
     { description: 'Your spot balances (spotClearinghouseState). Note: HyPaper spot support is limited.' },
-    async () => json(await hypaper.info({ type: 'spotClearinghouseState', user: wallet })));
+    async () => json(await info({ type: 'spotClearinghouseState', user: wallet })));
 
   server.registerTool('get_supporter_status',
     { description: 'Your MCP access status: supporter subscription (active + expiry) and/or verified-executive flag.' },
@@ -73,11 +109,11 @@ export function buildSession(wallet: string): { server: McpServer; streams: Sess
   // ── market data (read, public) ──────────────────────────────────────────
   server.registerTool('get_all_mids',
     { description: 'Mid prices for every coin.' },
-    async () => json(await hypaper.info({ type: 'allMids' })));
+    async () => json(await info({ type: 'allMids' })));
 
   server.registerTool('get_l2_book',
     { description: 'L2 order book for a coin.', inputSchema: { coin: z.string().describe('e.g. BTC') } },
-    async ({ coin }) => json(await hypaper.info({ type: 'l2Book', coin })));
+    async ({ coin }) => json(await info({ type: 'l2Book', coin })));
 
   server.registerTool('get_candles',
     {
@@ -87,21 +123,21 @@ export function buildSession(wallet: string): { server: McpServer; streams: Sess
         startTime: z.number().int().describe('ms epoch'), endTime: z.number().int().optional(),
       },
     },
-    async ({ coin, interval, startTime, endTime }) => json(await hypaper.info({
+    async ({ coin, interval, startTime, endTime }) => json(await info({
       type: 'candleSnapshot', req: { coin, interval, startTime, endTime: endTime ?? Date.now() },
     })));
 
   server.registerTool('get_meta',
     { description: 'Perp universe metadata (coin names, szDecimals, max leverage).' },
-    async () => json(await hypaper.info({ type: 'meta' })));
+    async () => json(await info({ type: 'meta' })));
 
   server.registerTool('get_asset_contexts',
     { description: 'Per-coin market context for every perp: mark/oracle/mid price, funding rate, open interest, 24h volume, prev-day price (metaAndAssetCtxs). Use for funding-aware decisions.' },
-    async () => json(await hypaper.info({ type: 'metaAndAssetCtxs' })));
+    async () => json(await info({ type: 'metaAndAssetCtxs' })));
 
   server.registerTool('get_order_status',
     { description: 'Status of a specific order by oid (filled / open / canceled / triggered).', inputSchema: { oid: z.number().int() } },
-    async ({ oid }) => json(await hypaper.info({ type: 'orderStatus', user: wallet, oid })));
+    async ({ oid }) => json(await info({ type: 'orderStatus', user: wallet, oid })));
 
   server.registerTool('get_chart_image',
     { description: 'The latest chart screenshot (with drawings) the user exported from slushy, returned as an image for visual analysis. Errors if none has been uploaded yet.' },
@@ -184,26 +220,39 @@ export function buildSession(wallet: string): { server: McpServer; streams: Sess
       const sd = await getSzDecimals(coin);
       const p = priceToWire(Number(price), sd);
       const s = sizeToWire(Number(size), sd);
-      // Set leverage deliberately when asked, so a position isn't opened at
-      // the account's default (e.g. 20x) by accident.
-      if (leverage) await hypaper.exchange(wallet, { type: 'updateLeverage', asset: a, isCross: cross ?? true, leverage });
+      // Collect the operation's action(s): optional leverage set, then the
+      // order (bracket or single). submit() executes (paper) or queues one
+      // pending entry for the user to confirm (live).
+      const actions: object[] = [];
+      if (leverage) actions.push({ type: 'updateLeverage', asset: a, isCross: cross ?? true, leverage });
+      const lev = leverage ? ` (${leverage}x)` : '';
+      let summary: string;
 
-      // OCO bracket — mirrors the slushy trading panel: entry first, then
-      // opposite-side reduceOnly isMarket TP/SL trigger children, grouping
-      // normalTpsl. HyPaper links them so one fill cancels the sibling.
+      // OCO bracket — entry + opposite-side reduceOnly isMarket TP/SL trigger
+      // children, grouping normalTpsl. HyPaper links them so one fill cancels
+      // the sibling.
       if (takeProfitPx || stopLossPx) {
         const entry = { a, b: isBuy, p, s, r: reduceOnly ?? false, t: { limit: { tif: tif ?? 'Gtc' } } };
         const orders: object[] = [entry];
         if (takeProfitPx) { const tp = priceToWire(Number(takeProfitPx), sd); orders.push({ a, b: !isBuy, p: tp, s, r: true, t: { trigger: { triggerPx: tp, isMarket: true, tpsl: 'tp' } } }); }
         if (stopLossPx) { const sl = priceToWire(Number(stopLossPx), sd); orders.push({ a, b: !isBuy, p: sl, s, r: true, t: { trigger: { triggerPx: sl, isMarket: true, tpsl: 'sl' } } }); }
-        return json(await hypaper.exchange(wallet, { type: 'order', grouping: 'normalTpsl', orders }));
+        actions.push({ type: 'order', grouping: 'normalTpsl', orders });
+        summary = `${isBuy ? 'Buy' : 'Sell'} ${s} ${coin} @ ${p} + TP/SL bracket${lev}`;
+      } else {
+        const t = trigger
+          ? { trigger: { triggerPx: priceToWire(Number(trigger.triggerPx), sd), isMarket: trigger.isMarket, tpsl: trigger.tpsl } }
+          : { limit: { tif: tif ?? 'Gtc' } };
+        actions.push({ type: 'order', grouping: 'na', orders: [{ a, b: isBuy, p, s, r: reduceOnly ?? false, t }] });
+        summary = `${isBuy ? 'Buy' : 'Sell'} ${s} ${coin} @ ${p}${trigger ? ` (${trigger.tpsl} trigger)` : ` ${tif ?? 'Gtc'}`}${lev}`;
       }
 
-      const t = trigger
-        ? { trigger: { triggerPx: priceToWire(Number(trigger.triggerPx), sd), isMarket: trigger.isMarket, tpsl: trigger.tpsl } }
-        : { limit: { tif: tif ?? 'Gtc' } };
-      const order = { a, b: isBuy, p, s, r: reduceOnly ?? false, t };
-      return json(await hypaper.exchange(wallet, { type: 'order', grouping: 'na', orders: [order] }));
+      const q = queueLive(summary, ...actions);
+      if (q) return json(q);
+      // PAPER: set leverage (if any) then place the order; return the ORDER
+      // result (the last action) — identical to the original tool.
+      let result: unknown;
+      for (const action of actions) result = await rawExchange(wallet, action);
+      return json(result);
     });
 
   server.registerTool('modify_order',
@@ -227,7 +276,7 @@ export function buildSession(wallet: string): { server: McpServer; streams: Sess
         : { limit: { tif: tif ?? 'Gtc' } };
       const order = { a, b: isBuy, p, s, r: reduceOnly ?? false, t };
       void a; // asset resolved for validation/symmetry; modify keys off oid
-      return json(await hypaper.exchange(wallet, { type: 'modify', oid, order }));
+      return json(await submit(`Modify order ${oid}: ${isBuy ? 'buy' : 'sell'} ${s} ${coin} @ ${p}`, { type: 'modify', oid, order }));
     });
 
   server.registerTool('modify_bracket',
@@ -244,7 +293,7 @@ export function buildSession(wallet: string): { server: McpServer; streams: Sess
       const a = await resolveAsset(coin);
       const sd = await getSzDecimals(coin);
 
-      const state = await hypaper.info({ type: 'clearinghouseState', user: wallet }) as
+      const state = await info({ type: 'clearinghouseState', user: wallet }) as
         { assetPositions: Array<{ position: { coin: string; szi: string } }> };
       const pos = state.assetPositions.find((p) => p.position.coin === coin)?.position;
       if (!pos || Number(pos.szi) === 0) return fail(`No open ${coin} position to bracket.`);
@@ -253,7 +302,7 @@ export function buildSession(wallet: string): { server: McpServer; streams: Sess
 
       // Existing reduceOnly trigger legs for this coin, classified by HL's
       // orderType string ("Take Profit Market" / "Stop Market").
-      const open = await hypaper.info({ type: 'frontendOpenOrders', user: wallet }) as
+      const open = await info({ type: 'frontendOpenOrders', user: wallet }) as
         Array<{ coin: string; oid: number; isTrigger: boolean; reduceOnly: boolean; orderType: string }>;
       const legs = open.filter((o) => o.coin === coin && o.isTrigger && o.reduceOnly);
       const tpLeg = legs.find((o) => /take profit/i.test(o.orderType));
@@ -261,17 +310,25 @@ export function buildSession(wallet: string): { server: McpServer; streams: Sess
 
       // Modify the leg IN PLACE if it exists (preserves its place in the
       // bracket — same as the chart's drag/pencil); otherwise add it.
-      const setLeg = async (rawPx: string, tpsl: 'tp' | 'sl', existingOid?: number) => {
+      const legAction = (rawPx: string, tpsl: 'tp' | 'sl', existingOid?: number) => {
         const px = priceToWire(Number(rawPx), sd);
         const order = { a, b: closeIsBuy, p: px, s: size, r: true, t: { trigger: { triggerPx: px, isMarket: true, tpsl } } };
         return existingOid !== undefined
-          ? hypaper.exchange(wallet, { type: 'modify', oid: existingOid, order })
-          : hypaper.exchange(wallet, { type: 'order', grouping: 'na', orders: [order] });
+          ? { type: 'modify', oid: existingOid, order }
+          : { type: 'order', grouping: 'na', orders: [order] };
       };
 
+      const tpAction = takeProfitPx ? legAction(takeProfitPx, 'tp', tpLeg?.oid) : null;
+      const slAction = stopLossPx ? legAction(stopLossPx, 'sl', slLeg?.oid) : null;
+      const parts: string[] = [];
+      if (takeProfitPx) parts.push(`TP ${takeProfitPx}${tpLeg ? '' : ' (new)'}`);
+      if (stopLossPx) parts.push(`SL ${stopLossPx}${slLeg ? '' : ' (new)'}`);
+      const q = queueLive(`${coin} bracket — ${parts.join(', ')}`, ...([tpAction, slAction].filter((x) => x !== null) as object[]));
+      if (q) return json(q);
+      // PAPER: original labeled shape.
       const result: Record<string, unknown> = {};
-      if (takeProfitPx) result.takeProfit = { action: tpLeg ? `modified oid ${tpLeg.oid}` : 'added', resp: await setLeg(takeProfitPx, 'tp', tpLeg?.oid) };
-      if (stopLossPx) result.stopLoss = { action: slLeg ? `modified oid ${slLeg.oid}` : 'added', resp: await setLeg(stopLossPx, 'sl', slLeg?.oid) };
+      if (tpAction) result.takeProfit = { action: tpLeg ? `modified oid ${tpLeg.oid}` : 'added', resp: await rawExchange(wallet, tpAction) };
+      if (slAction) result.stopLoss = { action: slLeg ? `modified oid ${slLeg.oid}` : 'added', resp: await rawExchange(wallet, slAction) };
       return json(result);
     });
 
@@ -279,14 +336,14 @@ export function buildSession(wallet: string): { server: McpServer; streams: Sess
     { description: 'Cancel one resting order by oid.', inputSchema: { coin: z.string(), oid: z.number().int() } },
     async ({ coin, oid }) => {
       const a = await resolveAsset(coin);
-      return json(await hypaper.exchange(wallet, { type: 'cancel', cancels: [{ a, o: oid }] }));
+      return json(await submit(`Cancel order ${oid} (${coin})`, { type: 'cancel', cancels: [{ a, o: oid }] }));
     });
 
   server.registerTool('cancel_by_cloid',
     { description: 'Cancel an order by its client order id (cloid, 0x-prefixed 16-byte hex).', inputSchema: { coin: z.string(), cloid: z.string() } },
     async ({ coin, cloid }) => {
       const asset = await resolveAsset(coin);
-      return json(await hypaper.exchange(wallet, { type: 'cancelByCloid', cancels: [{ asset, cloid }] }));
+      return json(await submit(`Cancel ${coin} order cloid ${cloid}`, { type: 'cancelByCloid', cancels: [{ asset, cloid }] }));
     });
 
   // ── stubs: wired to the real HL actions, but HyPaper doesn't implement them
@@ -300,7 +357,7 @@ export function buildSession(wallet: string): { server: McpServer; streams: Sess
     },
     async ({ coin, isBuy, ntli }) => {
       const asset = await resolveAsset(coin);
-      return json(await hypaper.exchange(wallet, { type: 'updateIsolatedMargin', asset, isBuy, ntli }));
+      return json(await submit(`${isBuy ? 'Add' : 'Remove'} ${coin} isolated margin (${ntli / 1e6} USD)`, { type: 'updateIsolatedMargin', asset, isBuy, ntli }));
     });
 
   server.registerTool('schedule_cancel',
@@ -308,16 +365,18 @@ export function buildSession(wallet: string): { server: McpServer; streams: Sess
       description: "Dead-man's switch: cancel all open orders at `time` (unix ms) unless refreshed; omit time to clear. STUB: requires HyPaper scheduleCancel support (in progress) — errors until then.",
       inputSchema: { time: z.number().int().optional() },
     },
-    async ({ time }) => json(await hypaper.exchange(wallet, time !== undefined ? { type: 'scheduleCancel', time } : { type: 'scheduleCancel' })));
+    async ({ time }) => json(await submit(
+      time !== undefined ? `Schedule cancel-all at ${time}` : 'Clear scheduled cancel-all',
+      time !== undefined ? { type: 'scheduleCancel', time } : { type: 'scheduleCancel' })));
 
   server.registerTool('cancel_all_orders',
     { description: 'Cancel all of your resting open orders.' },
     async () => {
-      const open = await hypaper.info({ type: 'frontendOpenOrders', user: wallet }) as Array<{ coin: string; oid: number }>;
+      const open = await info({ type: 'frontendOpenOrders', user: wallet }) as Array<{ coin: string; oid: number }>;
       if (!Array.isArray(open) || open.length === 0) return json({ cancelled: 0 });
       const cancels = [] as Array<{ a: number; o: number }>;
       for (const o of open) cancels.push({ a: await resolveAsset(o.coin), o: o.oid });
-      return json(await hypaper.exchange(wallet, { type: 'cancel', cancels }));
+      return json(await submit(`Cancel all ${cancels.length} open orders`, { type: 'cancel', cancels }));
     });
 
   server.registerTool('set_leverage',
@@ -327,7 +386,7 @@ export function buildSession(wallet: string): { server: McpServer; streams: Sess
     },
     async ({ coin, leverage, cross }) => {
       const asset = await resolveAsset(coin);
-      return json(await hypaper.exchange(wallet, { type: 'updateLeverage', asset, isCross: cross ?? true, leverage }));
+      return json(await submit(`Set ${coin} leverage ${leverage}x ${cross ?? true ? 'cross' : 'isolated'}`, { type: 'updateLeverage', asset, isCross: cross ?? true, leverage }));
     });
 
   server.registerTool('close_position',
@@ -338,7 +397,7 @@ export function buildSession(wallet: string): { server: McpServer; streams: Sess
     async ({ coin, size }) => {
       const a = await resolveAsset(coin);
       const sd = await getSzDecimals(coin);
-      const state = await hypaper.info({ type: 'clearinghouseState', user: wallet }) as
+      const state = await info({ type: 'clearinghouseState', user: wallet }) as
         { assetPositions: Array<{ position: { coin: string; szi: string } }> };
       const pos = state.assetPositions.find((p) => p.position.coin === coin)?.position;
       if (!pos || Number(pos.szi) === 0) return fail(`No open ${coin} position to close.`);
@@ -348,16 +407,20 @@ export function buildSession(wallet: string): { server: McpServer; streams: Sess
 
       // Cancel the position's protective bracket first — otherwise the TP/SL
       // triggers linger as dangling reduceOnly orders after we flatten.
-      const open = await hypaper.info({ type: 'frontendOpenOrders', user: wallet }) as
+      const open = await info({ type: 'frontendOpenOrders', user: wallet }) as
         Array<{ coin: string; oid: number; isTrigger: boolean; reduceOnly: boolean }>;
       const triggers = open.filter((o) => o.coin === coin && o.isTrigger && o.reduceOnly);
-      if (triggers.length) await hypaper.exchange(wallet, { type: 'cancel', cancels: triggers.map((o) => ({ a, o: o.oid })) });
 
-      const mid = Number((await hypaper.info({ type: 'allMids' }))[coin] ?? 0);
+      const mid = Number((await info({ type: 'allMids' }))[coin] ?? 0);
       // IOC across the book: cross aggressively in the close direction.
       const px = priceToWire(closeIsBuy ? mid * 1.05 : mid * 0.95, sd);
-      const order = { a, b: closeIsBuy, p: px, s: closeSz, r: true, t: { limit: { tif: 'Ioc' } } };
-      const close = await hypaper.exchange(wallet, { type: 'order', grouping: 'na', orders: [order] });
+      const cancelAction = triggers.length ? { type: 'cancel', cancels: triggers.map((o) => ({ a, o: o.oid })) } : null;
+      const closeAction = { type: 'order', grouping: 'na', orders: [{ a, b: closeIsBuy, p: px, s: closeSz, r: true, t: { limit: { tif: 'Ioc' } } }] };
+      const q = queueLive(`Close ${closeSz} ${coin}${triggers.length ? ` (+ cancel ${triggers.length} bracket leg(s))` : ''}`, ...([cancelAction, closeAction].filter((x) => x !== null) as object[]));
+      if (q) return json(q);
+      // PAPER: cancel the bracket first, then flatten — original shape.
+      if (cancelAction) await rawExchange(wallet, cancelAction);
+      const close = await rawExchange(wallet, closeAction);
       return json({ cancelledBracket: triggers.map((o) => o.oid), close });
     });
 
@@ -372,24 +435,24 @@ export function buildSession(wallet: string): { server: McpServer; streams: Sess
     async ({ coin, isBuy, size, minutes, reduceOnly, randomize }) => {
       const a = await resolveAsset(coin);
       const s = sizeToWire(Number(size), await getSzDecimals(coin));
-      return json(await hypaper.exchange(wallet, { type: 'twapOrder', twap: { a, b: isBuy, s, r: reduceOnly ?? false, m: minutes, t: randomize ?? false } }));
+      return json(await submit(`TWAP ${isBuy ? 'buy' : 'sell'} ${s} ${coin} over ${minutes}m`, { type: 'twapOrder', twap: { a, b: isBuy, s, r: reduceOnly ?? false, m: minutes, t: randomize ?? false } }));
     });
 
   server.registerTool('cancel_twap',
     { description: 'Cancel a running TWAP by twapId.', inputSchema: { coin: z.string(), twapId: z.number().int() } },
     async ({ coin, twapId }) => {
       const a = await resolveAsset(coin);
-      return json(await hypaper.exchange(wallet, { type: 'twapCancel', a, t: twapId }));
+      return json(await submit(`Cancel ${coin} TWAP ${twapId}`, { type: 'twapCancel', a, t: twapId }));
     });
 
-  // ── paper-only admin ──────────────────────────────────────────────────────
+  // ── paper-only admin (no live equivalent — these mutate the paper account) ──
   server.registerTool('reset_account',
     { description: 'Wipe your paper positions/orders/fills and reset the balance to default.' },
-    async () => json(await hypaper.admin({ type: 'resetAccount', user: wallet })));
+    async () => mode === 'live' ? fail('reset_account is paper-only — it has no effect on a live Hyperliquid account.') : json(await hypaper.admin({ type: 'resetAccount', user: wallet })));
 
   server.registerTool('set_balance',
     { description: 'Set your paper account balance (USDC).', inputSchema: { balance: z.number().nonnegative() } },
-    async ({ balance }) => json(await hypaper.admin({ type: 'setBalance', user: wallet, balance })));
+    async ({ balance }) => mode === 'live' ? fail('set_balance is paper-only — you cannot set a live Hyperliquid balance.') : json(await hypaper.admin({ type: 'setBalance', user: wallet, balance })));
 
   const streams = attachStreams(server, wallet);
   return { server, streams };

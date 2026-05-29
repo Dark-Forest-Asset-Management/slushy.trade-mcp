@@ -19,6 +19,7 @@ import * as oauth from './oauth.js';
 import { buildSession } from './mcp.js';
 import { streamChat, type ChatMessage, type ChatProvider } from './chat.js';
 import { setChart, setDrawings, getAgentDrawings, getClearUserSignal } from './chart-store.js';
+import { getPendingLiveOrders, resolveLiveOrder } from './live-orders.js';
 import type { SessionStreams } from './streaming.js';
 import { config } from './config.js';
 
@@ -145,6 +146,22 @@ export function createApp() {
     res.json({ drawings: getAgentDrawings(auth.wallet), clearUserSignal: getClearUserSignal(auth.wallet) });
   });
 
+  // Live-order confirm flow (Part B). In live mode the trade tools QUEUE
+  // unsigned actions here; the slushy browser polls them, shows a confirm
+  // modal, signs + submits to real HL on approve, then resolves the entry.
+  app.get('/live-pending', async (req: Request, res: Response) => {
+    const auth = await authenticate(req.headers.authorization);
+    if (!auth.ok) { res.status(auth.status).json({ error: auth.error }); return; }
+    res.json({ pending: getPendingLiveOrders(auth.wallet) });
+  });
+  app.post('/live-pending/resolve', async (req: Request, res: Response) => {
+    const auth = await authenticate(req.headers.authorization);
+    if (!auth.ok) { res.status(auth.status).json({ error: auth.error }); return; }
+    const { id } = (req.body ?? {}) as { id?: string };
+    if (!id) { res.status(400).json({ error: 'id is required' }); return; }
+    res.json({ resolved: resolveLiveOrder(auth.wallet, id) });
+  });
+
   // In-app chat (SSE). Supporter-gated by the same Bearer token, which also
   // doubles as the MCP credential the chosen provider uses to reach /mcp. The
   // BYO LLM key (body.apiKey) is used once and never logged or stored.
@@ -153,8 +170,9 @@ export function createApp() {
     if (!auth.ok) { res.status(auth.status).json({ error: auth.error }); return; }
 
     const body = (req.body ?? {}) as {
-      provider?: string; model?: string; apiKey?: string; messages?: unknown;
+      provider?: string; model?: string; apiKey?: string; messages?: unknown; mode?: string;
     };
+    const mode = body.mode === 'live' ? 'live' : 'paper';
     const provider = body.provider as ChatProvider;
     if (provider !== 'anthropic' && provider !== 'openai' && provider !== 'gemini') {
       res.status(400).json({ error: 'provider must be anthropic | openai | gemini' }); return;
@@ -179,7 +197,7 @@ export function createApp() {
 
     try {
       await streamChat(
-        { provider, model: body.model, apiKey: body.apiKey, messages, mcpToken },
+        { provider, model: body.model, apiKey: body.apiKey, messages, mcpToken, mode },
         {
           text: (t) => send({ type: 'text', text: t }),
           tool: (name) => send({ type: 'tool', name }),
@@ -222,7 +240,10 @@ export function createApp() {
       return;
     }
 
-    const { server, streams } = buildSession(auth.wallet);
+    // `?mode=live` on the /mcp URL binds the session to the user's live HL
+    // account for reads (writes stay blocked until client-side signing lands).
+    const mode = req.query.mode === 'live' ? 'live' : 'paper';
+    const { server, streams } = buildSession(auth.wallet, mode);
     const transport = new StreamableHTTPServerTransport({
       sessionIdGenerator: () => randomUUID(),
       onsessioninitialized: (id) => { sessions.set(id, { transport, streams }); },

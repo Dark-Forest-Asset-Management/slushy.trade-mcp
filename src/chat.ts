@@ -27,6 +27,8 @@ import { config } from './config.js';
 export type ChatProvider = 'anthropic' | 'openai' | 'gemini';
 export interface ChatMessage { role: 'user' | 'assistant'; content: string }
 
+export type TradeMode = 'live' | 'paper';
+
 export interface ChatStreamOpts {
   provider: ChatProvider;
   model: string;
@@ -35,6 +37,9 @@ export interface ChatStreamOpts {
   messages: ChatMessage[];
   /** The user's raw slushy MCP token (no "Bearer" prefix). */
   mcpToken: string;
+  /** Whether the user's slushy session is on live Hyperliquid or paper. Drives
+   *  the system prompt wording (and, downstream, which account the tools act on). */
+  mode: TradeMode;
 }
 
 /** Callbacks the route maps onto SSE frames. */
@@ -44,20 +49,40 @@ export interface ChatSink {
   error: (msg: string) => void;
 }
 
-const MCP_URL = config.mcpResourceUrl; // our own public /mcp
+// Our own public /mcp. `?mode=live` binds the session to the user's live HL
+// account (reads); paper omits it. The connectors POST to this exact URL.
+const mcpUrl = (mode: TradeMode) => mode === 'live' ? `${config.mcpResourceUrl}?mode=live` : config.mcpResourceUrl;
 
-const SYSTEM = [
-  'You are slushy, the in-app trading copilot on slushy.trade — a Hyperliquid',
-  'paper-trading frontend. You have tools (via the connected slushy MCP server)',
-  'to read the user\'s paper account, live markets, and their current chart',
-  '(get_chart_image / get_chart_drawings), and to place, modify, and cancel',
-  'paper orders. Everything is the user\'s own PAPER account.',
-  'Be concise and concrete. Quote real numbers from tool results — never invent',
-  'prices or balances. Before placing or cancelling an order, restate what you',
-  'are about to do in one line unless the user was already explicit.',
-].join(' ');
+function systemPrompt(mode: TradeMode): string {
+  if (mode === 'live') {
+    return [
+      'You are slushy, the in-app trading copilot on slushy.trade, connected to the',
+      "user's LIVE Hyperliquid account. You have tools (via the connected slushy MCP",
+      "server) to read the user's account, positions and orders, live markets, and their",
+      'current chart (get_chart_image / get_chart_drawings), and to place, modify, and',
+      'cancel orders. These are REAL orders settling with REAL funds on Hyperliquid.',
+      'Be concise and concrete. Quote real numbers from tool results — never invent',
+      'prices or balances. ALWAYS restate the exact order (side, size, coin, price) and',
+      'get explicit confirmation before placing or cancelling, unless the user already',
+      'gave a fully specified instruction.',
+    ].join(' ');
+  }
+  return [
+    'You are slushy, the in-app trading copilot on slushy.trade — a Hyperliquid',
+    'paper-trading frontend. You have tools (via the connected slushy MCP server)',
+    'to read the user\'s account, live markets, and their current chart',
+    '(get_chart_image / get_chart_drawings), and to place, modify, and cancel',
+    'orders. This is the user\'s own paper-trading account.',
+    'Be concise and concrete. Quote real numbers from tool results — never invent',
+    'prices or balances. Before placing or cancelling an order, restate what you',
+    'are about to do in one line unless the user was already explicit.',
+  ].join(' ');
+}
 
-const MAX_TOKENS = 4096;
+// Max output tokens for the Anthropic path (the only provider that requires an
+// explicit cap; OpenAI/Gemini use their high provider defaults). Generous for a
+// copilot — it's just a ceiling, the model still stops when it's done.
+const MAX_TOKENS = 16384;
 const MAX_TOOL_ROUNDS = 16;
 
 /** Stream a chat completion, relaying text + tool-use to `sink`. */
@@ -76,9 +101,9 @@ async function streamAnthropic(o: ChatStreamOpts, sink: ChatSink): Promise<void>
   const stream = client.beta.messages.stream({
     model: o.model,
     max_tokens: MAX_TOKENS,
-    system: SYSTEM,
+    system: systemPrompt(o.mode),
     messages: o.messages.map((m) => ({ role: m.role, content: m.content })),
-    mcp_servers: [{ type: 'url', url: MCP_URL, name: 'slushy', authorization_token: o.mcpToken }],
+    mcp_servers: [{ type: 'url', url: mcpUrl(o.mode), name: 'slushy', authorization_token: o.mcpToken }],
     betas: ['mcp-client-2025-11-20'],
   });
 
@@ -99,12 +124,12 @@ async function streamOpenAI(o: ChatStreamOpts, sink: ChatSink): Promise<void> {
   const client = new OpenAI({ apiKey: o.apiKey });
   const stream = await client.responses.create({
     model: o.model,
-    instructions: SYSTEM,
+    instructions: systemPrompt(o.mode),
     input: o.messages.map((m) => ({ role: m.role, content: m.content })),
     tools: [{
       type: 'mcp',
       server_label: 'slushy',
-      server_url: MCP_URL,
+      server_url: mcpUrl(o.mode),
       authorization: o.mcpToken,
       require_approval: 'never',
     }],
@@ -123,7 +148,7 @@ async function streamOpenAI(o: ChatStreamOpts, sink: ChatSink): Promise<void> {
 
 // ─── Gemini (own MCP client + mcpToTool) ───────────────────────────────────
 async function streamGemini(o: ChatStreamOpts, sink: ChatSink): Promise<void> {
-  const transport = new StreamableHTTPClientTransport(new URL(MCP_URL), {
+  const transport = new StreamableHTTPClientTransport(new URL(mcpUrl(o.mode)), {
     requestInit: { headers: { Authorization: `Bearer ${o.mcpToken}` } },
   });
   const mcp = new Client({ name: 'slushy-chat', version: '0.1.0' });
@@ -137,7 +162,7 @@ async function streamGemini(o: ChatStreamOpts, sink: ChatSink): Promise<void> {
         parts: [{ text: m.content }],
       })),
       config: {
-        systemInstruction: SYSTEM,
+        systemInstruction: systemPrompt(o.mode),
         tools: [mcpToTool(mcp)],
         automaticFunctionCalling: { maximumRemoteCalls: MAX_TOOL_ROUNDS },
       },

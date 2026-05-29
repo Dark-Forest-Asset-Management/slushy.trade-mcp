@@ -27,6 +27,10 @@ export const config = {
   hypaperHttpUrl: (process.env.HYPAPER_HTTP_URL ?? 'http://localhost:3000').replace(/\/$/, ''),
   hypaperWsUrl: process.env.HYPAPER_WS_URL ?? 'ws://localhost:3000/ws',
 
+  // Real Hyperliquid /info — used for LIVE-mode user reads (account, positions,
+  // orders, fills) keyed by the wallet address. Public endpoint, no auth.
+  hlInfoUrl: (process.env.HL_INFO_URL ?? 'https://api.hyperliquid.xyz').replace(/\/$/, ''),
+
   // Active-supporter gate. `SUPPORTER_CONTRACT` is the deployed
   // AdFreeSubscription contract on Arbitrum (named pre-rename; can't be
   // renamed on-chain). We read its `isPaidAdFree(address)` view.

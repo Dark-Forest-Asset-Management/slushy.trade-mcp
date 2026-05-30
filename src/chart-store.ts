@@ -67,6 +67,18 @@ export function clearAgentDrawings(wallet: string): number {
   return n;
 }
 
+/** Remove ONE agent drawing by id (the user deleted it on their chart, so it
+ *  must leave the buffer or the poll resurrects it). Returns how many matched. */
+export function removeAgentDrawing(wallet: string, id: string): number {
+  const key = wallet.toLowerCase();
+  const list = agentDrawings.get(key);
+  if (!list) return 0;
+  const next = list.filter((d) => (d as { id?: string })?.id !== id);
+  const removed = list.length - next.length;
+  if (next.length) agentDrawings.set(key, next); else agentDrawings.delete(key);
+  return removed;
+}
+
 // Opt-in "clear the USER's own drawings" command. A monotonic counter per
 // wallet; the slushy poll clears the user's drawings once when it sees the
 // counter increase. Destructive, so only bumped when explicitly requested.

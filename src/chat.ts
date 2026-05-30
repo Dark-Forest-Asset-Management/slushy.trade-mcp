@@ -10,9 +10,13 @@
  * the chat reuses the entire tool surface (account, markets, place_order,
  * get_chart_image, …) with zero re-plumbing:
  *   - Anthropic → Messages API `mcp_servers` connector (beta mcp-client-2025-11-20)
- *   - OpenAI    → Responses API hosted `mcp` tool (authorization = the token)
+ *   - OpenAI    → our own MCP client (Streamable HTTP) + a manual Responses
+ *                 function-call loop. NOT the hosted `mcp` tool: OpenAI's hosted
+ *                 connector does not forward IMAGE tool-results to the model, so
+ *                 get_chart_image was blind there. Running the client ourselves
+ *                 lets us inject the chart as an input_image (like Gemini).
  *   - Gemini    → an MCP client (Streamable HTTP) wrapped by mcpToTool()
- * For Anthropic/OpenAI the provider reaches /mcp server-side; for Gemini we
+ * For Anthropic the provider reaches /mcp server-side; for OpenAI + Gemini we
  * open the MCP client ourselves. All three pass the user's token, so a chat
  * can only ever touch that wallet's own paper account.
  */
@@ -119,30 +123,97 @@ async function streamAnthropic(o: ChatStreamOpts, sink: ChatSink): Promise<void>
   await stream.finalMessage();
 }
 
-// ─── OpenAI (Responses API hosted MCP tool) ────────────────────────────────
+// ─── OpenAI (own MCP client + manual Responses tool loop, with chart vision) ─
+// OpenAI's HOSTED MCP connector doesn't feed IMAGE tool-results to the model as
+// vision, so get_chart_image was blind on OpenAI while Gemini (own client)
+// could see it. We mirror Gemini: open our own MCP client, drive the
+// function-call loop ourselves, and inject any image tool-result as an
+// input_image. Conversation context is chained via previous_response_id so we
+// never have to replay reasoning items by hand.
 async function streamOpenAI(o: ChatStreamOpts, sink: ChatSink): Promise<void> {
-  const client = new OpenAI({ apiKey: o.apiKey });
-  const stream = await client.responses.create({
-    model: o.model,
-    instructions: systemPrompt(o.mode),
-    input: o.messages.map((m) => ({ role: m.role, content: m.content })),
-    tools: [{
-      type: 'mcp',
-      server_label: 'slushy',
-      server_url: mcpUrl(o.mode),
-      authorization: o.mcpToken,
-      require_approval: 'never',
-    }],
-    stream: true,
+  const transport = new StreamableHTTPClientTransport(new URL(mcpUrl(o.mode)), {
+    requestInit: { headers: { Authorization: `Bearer ${o.mcpToken}` } },
   });
+  const mcp = new Client({ name: 'slushy-chat', version: '0.1.0' });
+  await mcp.connect(transport);
+  try {
+    const client = new OpenAI({ apiKey: o.apiKey });
+    const listed = await mcp.listTools();
+    const tools = listed.tools.map((t) => ({
+      type: 'function' as const,
+      name: t.name,
+      description: t.description ?? '',
+      parameters: (t.inputSchema as Record<string, unknown> | undefined) ?? { type: 'object', properties: {} },
+      strict: false,
+    }));
 
-  for await (const event of stream) {
-    const e = event as { type: string; delta?: string; item?: { type?: string; name?: string } };
-    if (e.type === 'response.output_text.delta' && typeof e.delta === 'string') {
-      sink.text(e.delta);
-    } else if (e.type === 'response.output_item.added' && e.item?.type === 'mcp_call' && e.item.name) {
-      sink.tool(e.item.name);
+    // First turn carries the chat history; later turns carry only the new tool
+    // results (+ any injected images). previous_response_id threads the rest.
+    let nextInput: unknown[] = o.messages.map((m) => ({ role: m.role, content: m.content }));
+    let prevId: string | undefined;
+
+    for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
+      const stream = await client.responses.create({
+        model: o.model,
+        instructions: systemPrompt(o.mode),
+        input: nextInput as never,
+        tools,
+        stream: true,
+        ...(prevId ? { previous_response_id: prevId } : {}),
+      });
+
+      let output: Array<Record<string, unknown>> = [];
+      for await (const event of stream) {
+        const e = event as {
+          type: string; delta?: string;
+          item?: { type?: string; name?: string };
+          response?: { id?: string; output?: Array<Record<string, unknown>> };
+        };
+        if (e.type === 'response.output_text.delta' && typeof e.delta === 'string') {
+          sink.text(e.delta);
+        } else if (e.type === 'response.output_item.added' && e.item?.type === 'function_call' && e.item.name) {
+          sink.tool(e.item.name);
+        } else if (e.type === 'response.completed' && e.response) {
+          output = e.response.output ?? [];
+          prevId = e.response.id ?? prevId;
+        }
+      }
+
+      const calls = output.filter((it) => it.type === 'function_call') as Array<{
+        name: string; arguments: string; call_id: string;
+      }>;
+      if (calls.length === 0) return;       // model produced its final answer
+
+      // Each tool result becomes a function_call_output; image content is
+      // additionally injected as a vision input (the whole reason we run our
+      // own client for OpenAI).
+      nextInput = [];
+      for (const call of calls) {
+        let textOut: string;
+        const images: Array<{ data: string; mimeType?: string }> = [];
+        try {
+          const result = await mcp.callTool({
+            name: call.name,
+            arguments: call.arguments ? JSON.parse(call.arguments) : {},
+          });
+          const content = (result.content ?? []) as Array<{ type: string; text?: string; data?: string; mimeType?: string }>;
+          const texts = content.filter((c) => c.type === 'text' && c.text).map((c) => c.text as string);
+          for (const c of content) if (c.type === 'image' && c.data) images.push({ data: c.data, mimeType: c.mimeType });
+          textOut = texts.join('\n') || (images.length ? '[chart image returned — attached as the next message]' : '(no output)');
+        } catch (err) {
+          textOut = `Tool error: ${(err as Error).message}`;
+        }
+        nextInput.push({ type: 'function_call_output', call_id: call.call_id, output: textOut });
+        for (const img of images) {
+          nextInput.push({
+            role: 'user',
+            content: [{ type: 'input_image', image_url: `data:${img.mimeType ?? 'image/png'};base64,${img.data}`, detail: 'auto' }],
+          });
+        }
+      }
     }
+  } finally {
+    await mcp.close();
   }
 }
 

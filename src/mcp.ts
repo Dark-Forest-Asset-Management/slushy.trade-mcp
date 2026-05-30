@@ -182,6 +182,43 @@ export function buildSession(wallet: string, mode: SessionMode = 'paper'): { ser
       return json({ ok: true, totalAgentDrawings: addAgentDrawing(wallet, drawing) });
     });
 
+  server.registerTool('draw_position_bracket',
+    {
+      description: "Draw a long/short POSITION BRACKET (entry + take-profit + stop-loss) on the user's chart for visual review — the same Long/Short Bracket tool the user has in the chart toolbar. The user can drag it to fine-tune, then place the order themselves from the trade panel. This does NOT place an order. Renders ONLY on the chart for `coin` the user is currently viewing. Prices are absolute decimals — quote the live price (get_all_mids / get_l2_book) before choosing levels. To replace an existing bracket, clear_chart_drawings first.",
+      inputSchema: {
+        coin: z.string().describe('market the bracket belongs to (e.g. BTC, HYPE, xyz:CRWV) — it only renders on that chart'),
+        side: z.enum(['long', 'short']),
+        entryPx: z.number().positive().describe('entry / limit price'),
+        takeProfitPx: z.number().positive().optional().describe('take-profit price (above entry for long, below for short)'),
+        stopLossPx: z.number().positive().optional().describe('stop-loss price (below entry for long, above for short)'),
+        quantity: z.number().positive().optional().describe('position size in base units, for the R:R / PnL readout (default 1)'),
+        time: z.number().int().optional().describe('entry time as the box left edge, unix SECONDS (default: now)'),
+        color: z.string().optional().describe('hex line color (default: green for long, red for short)'),
+      },
+    },
+    async ({ coin, side, entryPx, takeProfitPx, stopLossPx, quantity, time, color }) => {
+      if (takeProfitPx === undefined && stopLossPx === undefined) {
+        return fail('Provide at least one of takeProfitPx or stopLossPx to draw a bracket.');
+      }
+      const drawing = {
+        // `ai-` namespace: rendered on the chart, excluded from the user's
+        // saved snapshot. The slushy chart builds a draggable
+        // LongPosition/ShortPosition from these fields via the plugin's class
+        // factory — NOT the generic anchor/fromJSON path, which doesn't
+        // round-trip the bracket's position options.
+        id: `ai-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+        coin,
+        type: side === 'long' ? 'long-position' : 'short-position',
+        entryPx,
+        takeProfitPx: takeProfitPx ?? null,
+        stopLossPx: stopLossPx ?? null,
+        quantity: quantity ?? 1,
+        time: time ?? null,
+        color: color ?? (side === 'long' ? '#26a69a' : '#ef5350'),
+      };
+      return json({ ok: true, totalAgentDrawings: addAgentDrawing(wallet, drawing) });
+    });
+
   server.registerTool('clear_chart_drawings',
     {
       description: "Clear AI-authored drawings for this wallet (the agent-drawings buffer the slushy chart renders). Set includeUserDrawings=true to ALSO clear the user's own chart drawings (destructive — only on explicit request).",
@@ -236,13 +273,15 @@ export function buildSession(wallet: string, mode: SessionMode = 'paper'): { ser
         const orders: object[] = [entry];
         if (takeProfitPx) { const tp = priceToWire(Number(takeProfitPx), sd); orders.push({ a, b: !isBuy, p: tp, s, r: true, t: { trigger: { triggerPx: tp, isMarket: true, tpsl: 'tp' } } }); }
         if (stopLossPx) { const sl = priceToWire(Number(stopLossPx), sd); orders.push({ a, b: !isBuy, p: sl, s, r: true, t: { trigger: { triggerPx: sl, isMarket: true, tpsl: 'sl' } } }); }
-        actions.push({ type: 'order', grouping: 'normalTpsl', orders });
+        // Canonical HL field order {type, orders, grouping} — HL re-hashes in
+        // struct order for signature recovery (see hlClient.submitRawAction).
+        actions.push({ type: 'order', orders, grouping: 'normalTpsl' });
         summary = `${isBuy ? 'Buy' : 'Sell'} ${s} ${coin} @ ${p} + TP/SL bracket${lev}`;
       } else {
         const t = trigger
           ? { trigger: { triggerPx: priceToWire(Number(trigger.triggerPx), sd), isMarket: trigger.isMarket, tpsl: trigger.tpsl } }
           : { limit: { tif: tif ?? 'Gtc' } };
-        actions.push({ type: 'order', grouping: 'na', orders: [{ a, b: isBuy, p, s, r: reduceOnly ?? false, t }] });
+        actions.push({ type: 'order', orders: [{ a, b: isBuy, p, s, r: reduceOnly ?? false, t }], grouping: 'na' });
         summary = `${isBuy ? 'Buy' : 'Sell'} ${s} ${coin} @ ${p}${trigger ? ` (${trigger.tpsl} trigger)` : ` ${tif ?? 'Gtc'}`}${lev}`;
       }
 
@@ -315,7 +354,7 @@ export function buildSession(wallet: string, mode: SessionMode = 'paper'): { ser
         const order = { a, b: closeIsBuy, p: px, s: size, r: true, t: { trigger: { triggerPx: px, isMarket: true, tpsl } } };
         return existingOid !== undefined
           ? { type: 'modify', oid: existingOid, order }
-          : { type: 'order', grouping: 'na', orders: [order] };
+          : { type: 'order', orders: [order], grouping: 'na' };
       };
 
       const tpAction = takeProfitPx ? legAction(takeProfitPx, 'tp', tpLeg?.oid) : null;
@@ -415,7 +454,7 @@ export function buildSession(wallet: string, mode: SessionMode = 'paper'): { ser
       // IOC across the book: cross aggressively in the close direction.
       const px = priceToWire(closeIsBuy ? mid * 1.05 : mid * 0.95, sd);
       const cancelAction = triggers.length ? { type: 'cancel', cancels: triggers.map((o) => ({ a, o: o.oid })) } : null;
-      const closeAction = { type: 'order', grouping: 'na', orders: [{ a, b: closeIsBuy, p: px, s: closeSz, r: true, t: { limit: { tif: 'Ioc' } } }] };
+      const closeAction = { type: 'order', orders: [{ a, b: closeIsBuy, p: px, s: closeSz, r: true, t: { limit: { tif: 'Ioc' } } }], grouping: 'na' };
       const q = queueLive(`Close ${closeSz} ${coin}${triggers.length ? ` (+ cancel ${triggers.length} bracket leg(s))` : ''}`, ...([cancelAction, closeAction].filter((x) => x !== null) as object[]));
       if (q) return json(q);
       // PAPER: cancel the bracket first, then flatten — original shape.

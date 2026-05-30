@@ -18,7 +18,7 @@ import { authenticate } from './auth.js';
 import * as oauth from './oauth.js';
 import { buildSession } from './mcp.js';
 import { streamChat, type ChatMessage, type ChatProvider } from './chat.js';
-import { setChart, setDrawings, getAgentDrawings, getClearUserSignal } from './chart-store.js';
+import { setChart, setDrawings, getAgentDrawings, getClearUserSignal, removeAgentDrawing } from './chart-store.js';
 import { getPendingLiveOrders, resolveLiveOrder } from './live-orders.js';
 import type { SessionStreams } from './streaming.js';
 import { config } from './config.js';
@@ -144,6 +144,17 @@ export function createApp() {
     const auth = await authenticate(req.headers.authorization);
     if (!auth.ok) { res.status(auth.status).json({ error: auth.error }); return; }
     res.json({ drawings: getAgentDrawings(auth.wallet), clearUserSignal: getClearUserSignal(auth.wallet) });
+  });
+
+  // Remove ONE agent drawing by id — the user deleted it on their chart, so it
+  // must leave the server buffer or the poll resurrects it (and it would also
+  // come back on reload). Supporter-gated. `?id=ai-…`.
+  app.delete('/agent-drawings', async (req: Request, res: Response) => {
+    const auth = await authenticate(req.headers.authorization);
+    if (!auth.ok) { res.status(auth.status).json({ error: auth.error }); return; }
+    const id = String(req.query.id ?? '');
+    if (!id) { res.status(400).json({ error: 'id query param required' }); return; }
+    res.json({ ok: true, removed: removeAgentDrawing(auth.wallet, id) });
   });
 
   // Live-order confirm flow (Part B). In live mode the trade tools QUEUE

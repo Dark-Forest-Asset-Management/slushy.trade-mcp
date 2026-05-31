@@ -144,7 +144,23 @@ export function buildSession(wallet: string, mode: SessionMode = 'paper'): { ser
     async () => {
       const c = getChart(wallet);
       if (!c) return { isError: true, content: [{ type: 'text' as const, text: 'No chart image pushed yet — use the brain button in slushy first.' }] };
-      return { content: [{ type: 'image' as const, data: c.data.toString('base64'), mimeType: c.mimeType }] };
+      // Triple-shape image content so every known MCP-image consumer can pick
+      // the field it understands:
+      //   - data + mimeType : the MCP spec shape (what Claude / Gemini read).
+      //   - image (data URL): the openai-agents-js native shape — its
+      //     normalizeStructuredToolOutput parses value.image FIRST, then falls
+      //     back to value.data + value.mimeType. The hosted Responses-API MCP
+      //     connector silently drops the spec shape (documented bug:
+      //     openai/codex#4819 + multiple community reports), so giving it a
+      //     pre-baked data URL in the field name it natively understands is
+      //     the only known workaround that doesn't require ChatGPT-side fixes.
+      const b64 = c.data.toString('base64');
+      return { content: [{
+        type: 'image' as const,
+        image: `data:${c.mimeType};base64,${b64}`,
+        data: b64,
+        mimeType: c.mimeType,
+      }] };
     });
 
   server.registerTool('get_chart_drawings',

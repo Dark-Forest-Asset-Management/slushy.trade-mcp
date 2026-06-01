@@ -9,7 +9,8 @@
     "dev": "tsx watch src/index.ts",
     "typecheck": "tsc --noEmit",
     "token": "tsx scripts/make-token.ts",
-    "chat-smoke": "tsx scripts/chat-smoke.ts"
+    "chat-smoke": "tsx scripts/chat-smoke.ts",
+    "subdex-smoke": "tsx scripts/mcp-subdex-smoke.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.99.0",

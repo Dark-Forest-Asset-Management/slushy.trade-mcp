@@ -62,33 +62,76 @@ export function buildSession(wallet: string, mode: SessionMode = 'paper'): { ser
 
   // ── account / info (read) ──────────────────────────────────────────────
   server.registerTool('get_account',
-    { description: 'Your paper account: positions, margin summary, account value, withdrawable.' },
-    async () => json(await info({ type: 'clearinghouseState', user: wallet })));
+    {
+      description: 'Your account: positions, margin summary, account value, withdrawable. Pass `dex` to scope to a builder-deployed sub-DEX (e.g. xyz, flx, vntl); omit for the native HL perp account. Each sub-DEX is its own subaccount with independent equity.',
+      inputSchema: { dex: z.string().optional().describe("sub-DEX name; omit for native. List via get_perp_dexs.") },
+    },
+    async ({ dex }) => json(await info({ type: 'clearinghouseState', user: wallet, ...(dex ? { dex } : {}) })));
+
+  server.registerTool('get_all_dex_accounts',
+    {
+      description: 'Aggregate per-DEX account state in ONE call: native + every builder sub-DEX (xyz, flx, vntl, hyna, km, abcd, cash, para). Returns `clearinghouseStates: [["", nativeCHS], ["xyz", xyzCHS], …]` so you can compare equity across sub-DEXes without N round-trips. Use this before deciding which sub-DEX to trade on.',
+    },
+    async () => json(await info({ type: 'allDexsClearinghouseState', user: wallet })));
 
   server.registerTool('get_open_orders',
-    { description: 'Your resting open orders (with trigger/TP-SL detail).' },
-    async () => json(await info({ type: 'frontendOpenOrders', user: wallet })));
+    {
+      description: 'Your resting open orders (with trigger/TP-SL detail). Pass `dex` to scope to a builder sub-DEX (e.g. xyz to see TP/SL on xyz:CRWV); omit for native.',
+      inputSchema: { dex: z.string().optional().describe('sub-DEX name; omit for native') },
+    },
+    async ({ dex }) => json(await info({ type: 'frontendOpenOrders', user: wallet, ...(dex ? { dex } : {}) })));
 
   server.registerTool('get_fills',
-    { description: 'Your recent fills.', inputSchema: { startTime: z.number().int().optional().describe('ms epoch; omit for recent') } },
-    async ({ startTime }) => json(await info(
-      startTime !== undefined ? { type: 'userFillsByTime', user: wallet, startTime } : { type: 'userFills', user: wallet })));
+    {
+      description: 'Your recent fills. Pass `dex` to scope to a builder sub-DEX; omit for native.',
+      inputSchema: {
+        startTime: z.number().int().optional().describe('ms epoch; omit for recent'),
+        dex: z.string().optional().describe('sub-DEX name; omit for native'),
+      },
+    },
+    async ({ startTime, dex }) => json(await info({
+      ...(startTime !== undefined
+        ? { type: 'userFillsByTime', user: wallet, startTime }
+        : { type: 'userFills', user: wallet }),
+      ...(dex ? { dex } : {}),
+    })));
 
   server.registerTool('get_portfolio',
-    { description: 'Account-value / PnL history across day/week/month/allTime (+ perp variants).' },
-    async () => json(await info({ type: 'portfolio', user: wallet })));
+    {
+      description: 'Account-value / PnL history across day/week/month/allTime (+ perp variants). Pass `dex` to scope to a sub-DEX subaccount; omit for native.',
+      inputSchema: { dex: z.string().optional().describe('sub-DEX name; omit for native') },
+    },
+    async ({ dex }) => json(await info({ type: 'portfolio', user: wallet, ...(dex ? { dex } : {}) })));
 
   server.registerTool('get_order_history',
-    { description: 'Your historical orders (filled / canceled / triggered), most recent first.', inputSchema: { limit: z.number().int().optional().describe('default 200') } },
-    async ({ limit }) => json(await info({ type: 'historicalOrders', user: wallet, limit: limit ?? 200 })));
+    {
+      description: 'Your historical orders (filled / canceled / triggered), most recent first. Pass `dex` to scope to a builder sub-DEX; omit for native.',
+      inputSchema: {
+        limit: z.number().int().optional().describe('default 200'),
+        dex: z.string().optional().describe('sub-DEX name; omit for native'),
+      },
+    },
+    async ({ limit, dex }) => json(await info({ type: 'historicalOrders', user: wallet, limit: limit ?? 200, ...(dex ? { dex } : {}) })));
 
   server.registerTool('get_funding_history',
-    { description: 'Funding payments applied to your positions.', inputSchema: { startTime: z.number().int().optional() } },
-    async ({ startTime }) => json(await info({ type: 'userFunding', user: wallet, startTime: startTime ?? 0 })));
+    {
+      description: 'Funding payments applied to your positions. Pass `dex` to scope to a builder sub-DEX; omit for native.',
+      inputSchema: {
+        startTime: z.number().int().optional(),
+        dex: z.string().optional().describe('sub-DEX name; omit for native'),
+      },
+    },
+    async ({ startTime, dex }) => json(await info({ type: 'userFunding', user: wallet, startTime: startTime ?? 0, ...(dex ? { dex } : {}) })));
 
   server.registerTool('get_ledger',
-    { description: 'Non-funding balance changes (deposits / withdrawals / transfers).', inputSchema: { startTime: z.number().int().optional() } },
-    async ({ startTime }) => json(await info({ type: 'userNonFundingLedgerUpdates', user: wallet, startTime: startTime ?? 0 })));
+    {
+      description: 'Non-funding balance changes (deposits / withdrawals / transfers). Pass `dex` to scope to a builder sub-DEX; omit for native.',
+      inputSchema: {
+        startTime: z.number().int().optional(),
+        dex: z.string().optional().describe('sub-DEX name; omit for native'),
+      },
+    },
+    async ({ startTime, dex }) => json(await info({ type: 'userNonFundingLedgerUpdates', user: wallet, startTime: startTime ?? 0, ...(dex ? { dex } : {}) })));
 
   server.registerTool('get_fees',
     { description: 'Your fee schedule + daily volume + maker/taker rates.' },
@@ -128,12 +171,24 @@ export function buildSession(wallet: string, mode: SessionMode = 'paper'): { ser
     })));
 
   server.registerTool('get_meta',
-    { description: 'Perp universe metadata (coin names, szDecimals, max leverage).' },
-    async () => json(await info({ type: 'meta' })));
+    {
+      description: 'Perp universe metadata (coin names, szDecimals, max leverage). Pass `dex` for a builder sub-DEX universe (xyz, flx, …); omit for the native HL universe. Sub-DEX tickers come back as "<dex>:SYMBOL" (e.g. "xyz:CRWV").',
+      inputSchema: { dex: z.string().optional().describe('sub-DEX name; omit for native') },
+    },
+    async ({ dex }) => json(await info({ type: 'meta', ...(dex ? { dex } : {}) })));
 
   server.registerTool('get_asset_contexts',
-    { description: 'Per-coin market context for every perp: mark/oracle/mid price, funding rate, open interest, 24h volume, prev-day price (metaAndAssetCtxs). Use for funding-aware decisions.' },
-    async () => json(await info({ type: 'metaAndAssetCtxs' })));
+    {
+      description: 'Per-coin market context for every perp: mark/oracle/mid price, funding rate, open interest, 24h volume, prev-day price (metaAndAssetCtxs). Use for funding-aware decisions. Pass `dex` for a builder sub-DEX universe.',
+      inputSchema: { dex: z.string().optional().describe('sub-DEX name; omit for native') },
+    },
+    async ({ dex }) => json(await info({ type: 'metaAndAssetCtxs', ...(dex ? { dex } : {}) })));
+
+  server.registerTool('get_perp_dexs',
+    {
+      description: 'List every builder-deployed perp sub-DEX (xyz, flx, vntl, hyna, km, abcd, cash, para) with their deployer, fee scale, asset OI caps, and funding multipliers. Use this to discover sub-DEXes before scoping other tools with `dex`. Index 0 is always null (native HL); indices 1+ are sub-DEXes.',
+    },
+    async () => json(await info({ type: 'perpDexs' })));
 
   server.registerTool('get_order_status',
     { description: 'Status of a specific order by oid (filled / open / canceled / triggered).', inputSchema: { oid: z.number().int() } },
@@ -348,7 +403,14 @@ export function buildSession(wallet: string, mode: SessionMode = 'paper'): { ser
       const a = await resolveAsset(coin);
       const sd = await getSzDecimals(coin);
 
-      const state = await info({ type: 'clearinghouseState', user: wallet }) as
+      // Sub-DEX coins look like "xyz:CRWV". Without `dex` scoping, the chs +
+      // openOrders reads return native only and the tool would error
+      // "No open xyz:CRWV position to bracket." even when the position is
+      // resting on the xyz subaccount.
+      const dex = coin.includes(':') ? coin.split(':', 1)[0] : '';
+      const dexScope = dex ? { dex } : {};
+
+      const state = await info({ type: 'clearinghouseState', user: wallet, ...dexScope }) as
         { assetPositions: Array<{ position: { coin: string; szi: string } }> };
       const pos = state.assetPositions.find((p) => p.position.coin === coin)?.position;
       if (!pos || Number(pos.szi) === 0) return fail(`No open ${coin} position to bracket.`);
@@ -357,7 +419,7 @@ export function buildSession(wallet: string, mode: SessionMode = 'paper'): { ser
 
       // Existing reduceOnly trigger legs for this coin, classified by HL's
       // orderType string ("Take Profit Market" / "Stop Market").
-      const open = await info({ type: 'frontendOpenOrders', user: wallet }) as
+      const open = await info({ type: 'frontendOpenOrders', user: wallet, ...dexScope }) as
         Array<{ coin: string; oid: number; isTrigger: boolean; reduceOnly: boolean; orderType: string }>;
       const legs = open.filter((o) => o.coin === coin && o.isTrigger && o.reduceOnly);
       const tpLeg = legs.find((o) => /take profit/i.test(o.orderType));
@@ -425,12 +487,34 @@ export function buildSession(wallet: string, mode: SessionMode = 'paper'): { ser
       time !== undefined ? { type: 'scheduleCancel', time } : { type: 'scheduleCancel' })));
 
   server.registerTool('cancel_all_orders',
-    { description: 'Cancel all of your resting open orders.' },
-    async () => {
-      const open = await info({ type: 'frontendOpenOrders', user: wallet }) as Array<{ coin: string; oid: number }>;
-      if (!Array.isArray(open) || open.length === 0) return json({ cancelled: 0 });
-      const cancels = [] as Array<{ a: number; o: number }>;
-      for (const o of open) cancels.push({ a: await resolveAsset(o.coin), o: o.oid });
+    {
+      description: 'Cancel all of your resting open orders. By default sweeps native + every builder sub-DEX (xyz, flx, …). Pass `dex` to scope the sweep to one specific sub-DEX, or `dex: ""` to limit to native only.',
+      inputSchema: { dex: z.string().optional().describe('omit to sweep ALL dexes; "" for native-only; "xyz" etc. for a single sub-DEX') },
+    },
+    async ({ dex }) => {
+      // Build the list of dex scopes to sweep. Each sub-DEX is its own
+      // subaccount, so openOrders without dex returns ONLY native — without
+      // this loop "cancel all" would silently leave sub-DEX orders resting.
+      const scopes: string[] = [];
+      if (dex === undefined) {
+        // No arg → sweep everything. Start with native, then enumerate dexes.
+        scopes.push('');
+        try {
+          const dexs = await info({ type: 'perpDexs' }) as Array<{ name?: string } | null>;
+          for (const d of dexs) if (d?.name) scopes.push(d.name);
+        } catch { /* perpDexs unavailable → just sweep native */ }
+      } else {
+        scopes.push(dex);
+      }
+
+      const cancels: Array<{ a: number; o: number }> = [];
+      for (const scope of scopes) {
+        const open = await info({ type: 'frontendOpenOrders', user: wallet, ...(scope ? { dex: scope } : {}) }) as
+          Array<{ coin: string; oid: number }>;
+        if (!Array.isArray(open)) continue;
+        for (const o of open) cancels.push({ a: await resolveAsset(o.coin), o: o.oid });
+      }
+      if (cancels.length === 0) return json({ cancelled: 0 });
       return json(await submit(`Cancel all ${cancels.length} open orders`, { type: 'cancel', cancels }));
     });
 

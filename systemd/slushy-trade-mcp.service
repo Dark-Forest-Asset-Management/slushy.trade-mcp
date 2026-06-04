@@ -17,12 +17,15 @@ StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=slushy-trade-mcp
 
-# Hardening. State is in-memory (no data dir), so the whole fs can be
-# read-only except /tmp.
+# Hardening. OAuth client registrations are now persisted under
+# /var/lib/slushy-trade-mcp/clients.json (systemd auto-creates the dir
+# with the service user as owner). Everything else stays in-memory.
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ReadWritePaths=/opt/slushy-trade-mcp
+StateDirectory=slushy-trade-mcp
+StateDirectoryMode=0700
 ProtectKernelTunables=true
 ProtectKernelModules=true
 ProtectControlGroups=true

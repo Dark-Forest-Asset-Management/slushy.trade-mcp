@@ -21,12 +21,22 @@
  * unchanged, and a server restart never invalidates a live client (the token
  * carries its own proof; the on-chain gate is the real expiry).
  *
- * State is in-memory and ephemeral: registered clients, ~10-min pending
- * authorizations, and ~60-s single-use codes. None of it needs to survive a
- * restart because the issued access tokens are self-contained.
+ * State:
+ *   - `clients` (RFC 7591 registrations)  PERSISTED to disk. ChatGPT and
+ *      Claude Desktop cache their client_id and reuse it across our restarts;
+ *      losing the registry returns "Unknown client_id — register first." and
+ *      breaks every cached connector until the user removes + re-adds it.
+ *   - `pending` (~10-min PKCE state) and `codes` (~60-s single-use)
+ *      stay in-memory. Their TTLs are short enough that a restart mid-flow
+ *      just costs the user one retry.
+ *   - Issued access_tokens are the existing self-authenticating wallet
+ *      tokens — they never lived on the server, so restarts can't invalidate
+ *      a live session.
  */
 
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
+import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync } from 'node:fs';
+import { join } from 'node:path';
 import { authenticate } from './auth.js';
 import { config } from './config.js';
 
@@ -57,7 +67,38 @@ interface AuthCode {
   createdAt: number;
 }
 
-const clients = new Map<string, ClientReg>();
+// ─── Client-registry persistence ────────────────────────────────────
+// State dir defaults to /var/lib/slushy-trade-mcp (use systemd's
+// StateDirectory= to provision it with the right owner). Override with
+// MCP_STATE_DIR for local dev. The file is written via tmp+rename so a
+// crash mid-write can never leave a corrupt registry.
+const STATE_DIR = process.env.MCP_STATE_DIR ?? '/var/lib/slushy-trade-mcp';
+const CLIENTS_FILE = join(STATE_DIR, 'clients.json');
+
+function loadClients(): Map<string, ClientReg> {
+  try {
+    if (!existsSync(CLIENTS_FILE)) return new Map();
+    const arr = JSON.parse(readFileSync(CLIENTS_FILE, 'utf8')) as ClientReg[];
+    if (!Array.isArray(arr)) return new Map();
+    return new Map(arr.filter((c) => c && typeof c.clientId === 'string').map((c) => [c.clientId, c]));
+  } catch (err) {
+    console.error(`[oauth] failed to load ${CLIENTS_FILE}, starting empty:`, (err as Error).message);
+    return new Map();
+  }
+}
+
+function persistClients() {
+  try {
+    if (!existsSync(STATE_DIR)) mkdirSync(STATE_DIR, { recursive: true });
+    const tmp = CLIENTS_FILE + '.tmp';
+    writeFileSync(tmp, JSON.stringify([...clients.values()], null, 2), 'utf8');
+    renameSync(tmp, CLIENTS_FILE);
+  } catch (err) {
+    console.error(`[oauth] failed to persist ${CLIENTS_FILE}:`, (err as Error).message);
+  }
+}
+
+const clients = loadClients();
 const pending = new Map<string, PendingAuthz>();
 const codes = new Map<string, AuthCode>();
 
@@ -110,6 +151,7 @@ export function registerClient(body: RegBody):
   const clientName = typeof body?.client_name === 'string' ? body.client_name : undefined;
   const reg: ClientReg = { clientId, redirectUris, clientName, createdAt: Date.now() };
   clients.set(clientId, reg);
+  persistClients();  // ChatGPT/Claude cache this client_id across our restarts
   return {
     ok: true,
     doc: {

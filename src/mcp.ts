@@ -559,12 +559,9 @@ export function buildSession(wallet: string, mode: SessionMode = 'paper'): { ser
     });
 
   // ── stubs: wired to the real HL actions, but HyPaper doesn't implement them
-  // yet. They pass through and will start working the moment the backend adds
-  // the action (no MCP change needed) — until then HyPaper returns
-  // "Unsupported action type". Kept registered so the surface is complete.
   server.registerTool('update_isolated_margin',
     {
-      description: 'Add/remove isolated margin on a coin. ntli = USD in 6-dp units (1000000 = $1); + adds, − removes. STUB: requires HyPaper updateIsolatedMargin support (in progress) — errors until then.',
+      description: 'Add/remove isolated margin on a coin. ntli = USD in 6-dp units (1000000 = $1); + adds, − removes. Position state updates immediately; liq price is recomputed on the next account read.',
       inputSchema: { coin: z.string(), isBuy: z.boolean(), ntli: z.number().int() },
     },
     async ({ coin, isBuy, ntli }) => {
@@ -572,14 +569,37 @@ export function buildSession(wallet: string, mode: SessionMode = 'paper'): { ser
       return json(await submit(`${isBuy ? 'Add' : 'Remove'} ${coin} isolated margin (${ntli / 1e6} USD)`, { type: 'updateIsolatedMargin', asset, isBuy, ntli }));
     });
 
+  server.registerTool('top_up_isolated_only_margin',
+    {
+      description: 'Add margin to an isolated position with NO withdrawal path (locked collateral). Like update_isolated_margin but the deposit can never be removed. ntli = USD in 6-dp units (1000000 = $1).',
+      inputSchema: { coin: z.string(), ntli: z.number().int().positive() },
+    },
+    async ({ coin, ntli }) => {
+      const asset = await resolveAsset(coin);
+      return json(await submit(`Lock ${ntli / 1e6} USD into ${coin} isolated margin (no-withdraw)`, { type: 'topUpIsolatedOnlyMargin', asset, ntli }));
+    });
+
   server.registerTool('schedule_cancel',
     {
-      description: "Dead-man's switch: cancel all open orders at `time` (unix ms) unless refreshed; omit time to clear. STUB: requires HyPaper scheduleCancel support (in progress) — errors until then.",
+      description: "Dead-man's switch: cancel all open orders at `time` (unix ms) unless refreshed before the deadline. Omit time to clear an existing schedule. Minimum 5 s in the future; finer values are rejected.",
       inputSchema: { time: z.number().int().optional() },
     },
     async ({ time }) => json(await submit(
       time !== undefined ? `Schedule cancel-all at ${time}` : 'Clear scheduled cancel-all',
       time !== undefined ? { type: 'scheduleCancel', time } : { type: 'scheduleCancel' })));
+
+  server.registerTool('reserve_request_weight',
+    {
+      description: 'Pre-pay HL request-rate-limit weight before a burst (e.g. cancelling and re-placing a grid). Real HL deducts from the per-second budget; in paper mode this is a no-op acknowledgement so callers can wire the same code path against both backends.',
+      inputSchema: { weight: z.number().int().positive() },
+    },
+    async ({ weight }) => json(await submit(`Reserve ${weight} request weight`, { type: 'reserveRequestWeight', weight })));
+
+  server.registerTool('noop',
+    {
+      description: 'Explicit do-nothing action. Useful as a keepalive or to advance the rate-limit/nonce clock without trading.',
+    },
+    async () => json(await submit('Noop', { type: 'noop' })));
 
   server.registerTool('cancel_all_orders',
     {

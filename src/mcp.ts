@@ -10,6 +10,7 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import { hypaper, hlLiveInfo, resolveAsset, getSzDecimals } from './hypaper.js';
+import { fetchBracketSnapshot } from './bracket-tracker.js';
 import { priceToWire, sizeToWire } from './precision.js';
 import { getAccessStatus } from './supporter.js';
 import { getChart, getDrawings, addAgentDrawing, clearAgentDrawings, bumpClearUserDrawings } from './chart-store.js';
@@ -193,6 +194,100 @@ export function buildSession(wallet: string, mode: SessionMode = 'paper'): { ser
   server.registerTool('get_order_status',
     { description: 'Status of a specific order by oid (filled / open / canceled / triggered).', inputSchema: { oid: z.number().int() } },
     async ({ oid }) => json(await info({ type: 'orderStatus', user: wallet, oid })));
+
+  // ── resting-bracket telemetry (Black Owl hl-triggers-tracker) ─────────
+  // Surfaces the open trigger-order ledger for a coin — every TP, every
+  // SL, and the underlying position's entry price — sourced from the
+  // periodic ABCI state snapshots on the Black Owl HL non-validator.
+  // Public HL endpoints don't expose this (`/info openOrders` is
+  // per-user only). Snapshot cadence is ~11 min; callers should treat
+  // `snapshot_age_ms` as the freshness bound.
+
+  server.registerTool('get_resting_brackets',
+    {
+      description: [
+        'Every open TP/SL/OCO trigger order resting on a perp market, sourced from the Black Owl HL non-validator\'s periodic ABCI state snapshot (refreshes every ~11 minutes — check `snapshot_age_ms`).',
+        'Returns the full leg list — each leg has the trigger price, the placed limit price, the wallet, the order ID, the kind (tp/sl) and side (A=sell-trigger closes a long, B=buy-trigger closes a short), plus the joined ENTRY price from the wallet\'s underlying position (null for orphaned reduce-only triggers with no open position). Legs with `bracket: "oco"` are paired with their opposite-kind counterpart on the same wallet.',
+        'This is the only way to see the FULL bracket ledger across every wallet on the market — public HL `/info openOrders` is per-user only. Use it to map stop/target clusters, see where consensus-stop levels are stacked, find OCO brackets near the current price, or analyze the long-tail distribution of speculative targets. `mid_usd` is the snapshot\'s last trade price; `sz_decimals` is the asset\'s size precision (raw size = human size × 10^sz_decimals).',
+        'WARNING: large response on busy markets (XRP perp typically returns ~1,300 legs / ~250 KB). Use `get_bracket_clusters` for a price-bucketed summary if you only need density.',
+      ].join('\n\n'),
+      inputSchema: { coin: z.string().describe('e.g. "XRP", "BTC", "ETH" — perp dex 0 only') },
+    },
+    async ({ coin }) => json(await fetchBracketSnapshot(coin)));
+
+  server.registerTool('get_bracket_clusters',
+    {
+      description: [
+        'Price-bucketed density of resting trigger orders for a perp market — the bucketed view of `get_resting_brackets`. Same source (Black Owl ABCI snapshot, ~11 min staleness).',
+        'Returns: `{ asset_name, mid_usd, snapshot_block, snapshot_age_ms, bucket_width_usd, total_legs, in_range_legs, buckets: [{ price_low, price_high, tp_long_count, tp_long_size, tp_short_count, tp_short_size, sl_long_count, sl_long_size, sl_short_count, sl_short_size, entry_count, entry_size }] }`.',
+        '`bandPct` clips to ±X% from mid before bucketing — default 25%, the band where execution actually matters. Set higher to see the long tail (XRP has triggers up to $100K). `bins` controls vertical resolution. Each bucket reports BOTH count and summed size across the four (kind, side) categories plus the entry-price line, so you can weight by either order count or dollar-value-of-positions.',
+        '`onlyOco: true` restricts to legs that are part of a complete tp+sl pair on the same wallet — the actual brackets, dropping ~60% of legs that are standalone TPs or SLs.',
+      ].join('\n\n'),
+      inputSchema: {
+        coin: z.string().describe('e.g. "XRP", "BTC"'),
+        bins: z.number().int().min(4).max(200).optional().describe('Number of price buckets (default 40).'),
+        bandPct: z.number().min(0.5).max(500).optional().describe('Clip to ±X% from mid before bucketing (default 25). Use 100+ to see the long tail.'),
+        onlyOco: z.boolean().optional().describe('Restrict to legs that are part of a complete tp+sl OCO pair on the same wallet (default false).'),
+      },
+    },
+    async ({ coin, bins, bandPct, onlyOco }) => {
+      const snap = await fetchBracketSnapshot(coin);
+      const mid = snap.mid_usd ?? 0;
+      const band = (bandPct ?? 25) / 100;
+      const N = bins ?? 40;
+      const lo = mid * (1 - band);
+      const hi = mid * (1 + band);
+      const step = (hi - lo) / N;
+      type Bucket = {
+        price_low: number; price_high: number;
+        tp_long_count: number; tp_long_size: number;
+        tp_short_count: number; tp_short_size: number;
+        sl_long_count: number; sl_long_size: number;
+        sl_short_count: number; sl_short_size: number;
+        entry_count: number; entry_size: number;
+      };
+      const empty = (i: number): Bucket => ({
+        price_low: lo + i * step, price_high: lo + (i + 1) * step,
+        tp_long_count: 0, tp_long_size: 0,
+        tp_short_count: 0, tp_short_size: 0,
+        sl_long_count: 0, sl_long_size: 0,
+        sl_short_count: 0, sl_short_size: 0,
+        entry_count: 0, entry_size: 0,
+      });
+      const buckets: Bucket[] = Array.from({ length: N }, (_, i) => empty(i));
+      const wanted = onlyOco
+        ? snap.legs.filter((L) => L.bracket === 'oco')
+        : snap.legs;
+      let inRange = 0;
+      const placeAt = (px: number | null, sz: number, kind: 'tp' | 'sl' | 'entry', side: 'A' | 'B' | null): void => {
+        if (px == null || !Number.isFinite(px) || px < lo || px > hi || sz <= 0) return;
+        const i = Math.min(N - 1, Math.max(0, Math.floor((px - lo) / step)));
+        const b = buckets[i];
+        if (kind === 'entry')        { b.entry_count++;    b.entry_size    += sz; }
+        else if (kind === 'tp' && side === 'A') { b.tp_long_count++;  b.tp_long_size  += sz; }
+        else if (kind === 'tp' && side === 'B') { b.tp_short_count++; b.tp_short_size += sz; }
+        else if (kind === 'sl' && side === 'A') { b.sl_long_count++;  b.sl_long_size  += sz; }
+        else if (kind === 'sl' && side === 'B') { b.sl_short_count++; b.sl_short_size += sz; }
+      };
+      for (const L of wanted) {
+        if (L.trigger_px != null && L.trigger_px >= lo && L.trigger_px <= hi) inRange++;
+        placeAt(L.trigger_px, L.size, L.kind, L.side);
+        placeAt(L.entry_px, L.size, 'entry', null);
+      }
+      return json({
+        asset_name: snap.asset_name,
+        mid_usd: snap.mid_usd,
+        snapshot_block: snap.snapshot_block,
+        snapshot_age_ms: snap.snapshot_age_ms,
+        band_low_usd: lo,
+        band_high_usd: hi,
+        bucket_width_usd: step,
+        total_legs: snap.legs.length,
+        filtered_legs: wanted.length,
+        in_range_legs: inRange,
+        buckets,
+      });
+    });
 
   server.registerTool('get_chart_image',
     { description: 'The latest chart screenshot (with drawings) the user exported from slushy, returned as an image for visual analysis. Errors if none has been uploaded yet.' },

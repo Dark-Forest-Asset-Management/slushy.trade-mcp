@@ -31,6 +31,14 @@ export const config = {
   // orders, fills) keyed by the wallet address. Public endpoint, no auth.
   hlInfoUrl: (process.env.HL_INFO_URL ?? 'https://api.hyperliquid.xyz').replace(/\/$/, ''),
 
+  // Black Owl hl-triggers-tracker daemon — IP-allowlisted endpoint that
+  // serves the per-asset open trigger order ledger out of the periodic
+  // ABCI state snapshots. Public clients can't reach this; the prod box
+  // hosting slushy-trade-mcp must already be on the daemon's UFW allowlist
+  // (same allow rules as the slushy.trade frontend). Source:
+  // hl-websocket-bridge-config/bridge/hl-triggers-tracker.py.
+  bracketTrackerUrl: (process.env.BRACKET_TRACKER_URL ?? 'http://142.91.109.191:3004').replace(/\/$/, ''),
+
   // Active-supporter gate. `SUPPORTER_CONTRACT` is the deployed
   // AdFreeSubscription contract on Arbitrum (named pre-rename; can't be
   // renamed on-chain). We read its `isPaidAdFree(address)` view.

@@ -219,7 +219,7 @@ export function buildSession(wallet: string, mode: SessionMode = 'paper'): { ser
     {
       description: [
         'Price-bucketed density of resting trigger orders for a perp market — the bucketed view of `get_resting_brackets`. Same source (Black Owl ABCI snapshot, ~11 min staleness).',
-        'Returns: `{ asset_name, mid_usd, snapshot_block, snapshot_age_ms, bucket_width_usd, total_legs, in_range_legs, buckets: [{ price_low, price_high, tp_long_count, tp_long_size, tp_short_count, tp_short_size, sl_long_count, sl_long_size, sl_short_count, sl_short_size, entry_count, entry_size }] }`.',
+        'Returns: `{ asset_name, mid_usd, snapshot_block, snapshot_age_ms, bucket_width_usd, total_legs, in_range_legs, buckets: [{ price_low, price_high, tp_long_count, tp_long_size, tp_short_count, tp_short_size, sl_long_count, sl_long_size, sl_short_count, sl_short_size, entry_count, entry_size, entry_long_count, entry_long_size, entry_short_count, entry_short_size }] }`. `entry_count`/`entry_size` are the COMBINED entry totals at that bucket (kept for back-compat); `entry_long_*` and `entry_short_*` split that total by the underlying position\'s direction so callers can read net long vs. short conviction at a level.',
         '`bandPct` clips to ±X% from mid before bucketing — default 25%, the band where execution actually matters. Set higher to see the long tail (XRP has triggers up to $100K). `bins` controls vertical resolution. Each bucket reports BOTH count and summed size across the four (kind, side) categories plus the entry-price line, so you can weight by either order count or dollar-value-of-positions.',
         '`onlyOco: true` restricts to legs that are part of a complete tp+sl pair on the same wallet — the actual brackets, dropping ~60% of legs that are standalone TPs or SLs.',
       ].join('\n\n'),
@@ -244,7 +244,16 @@ export function buildSession(wallet: string, mode: SessionMode = 'paper'): { ser
         tp_short_count: number; tp_short_size: number;
         sl_long_count: number; sl_long_size: number;
         sl_short_count: number; sl_short_size: number;
+        /** Combined entry totals — kept for backward compatibility with
+         *  any agent already reading these. New consumers should prefer
+         *  the per-side `entry_long_*` / `entry_short_*` fields. */
         entry_count: number; entry_size: number;
+        /** Entries belonging to LONG underlying positions (side='A'
+         *  triggers — sell to close). */
+        entry_long_count: number; entry_long_size: number;
+        /** Entries belonging to SHORT underlying positions (side='B'
+         *  triggers — buy to close). */
+        entry_short_count: number; entry_short_size: number;
       };
       const empty = (i: number): Bucket => ({
         price_low: lo + i * step, price_high: lo + (i + 1) * step,
@@ -253,6 +262,8 @@ export function buildSession(wallet: string, mode: SessionMode = 'paper'): { ser
         sl_long_count: 0, sl_long_size: 0,
         sl_short_count: 0, sl_short_size: 0,
         entry_count: 0, entry_size: 0,
+        entry_long_count: 0, entry_long_size: 0,
+        entry_short_count: 0, entry_short_size: 0,
       });
       const buckets: Bucket[] = Array.from({ length: N }, (_, i) => empty(i));
       const wanted = onlyOco
@@ -263,7 +274,18 @@ export function buildSession(wallet: string, mode: SessionMode = 'paper'): { ser
         if (px == null || !Number.isFinite(px) || px < lo || px > hi || sz <= 0) return;
         const i = Math.min(N - 1, Math.max(0, Math.floor((px - lo) / step)));
         const b = buckets[i];
-        if (kind === 'entry')        { b.entry_count++;    b.entry_size    += sz; }
+        if (kind === 'entry') {
+          // Combined totals — kept for back-compat.
+          b.entry_count++;
+          b.entry_size += sz;
+          // New per-side aggregates. side='A' triggers close LONGS, so
+          // the underlying position is long → entry_long; side='B' is
+          // the inverse. Legs with no side (shouldn't happen for
+          // entries) are dropped from the split but still in the
+          // combined total.
+          if (side === 'A')      { b.entry_long_count++;  b.entry_long_size  += sz; }
+          else if (side === 'B') { b.entry_short_count++; b.entry_short_size += sz; }
+        }
         else if (kind === 'tp' && side === 'A') { b.tp_long_count++;  b.tp_long_size  += sz; }
         else if (kind === 'tp' && side === 'B') { b.tp_short_count++; b.tp_short_size += sz; }
         else if (kind === 'sl' && side === 'A') { b.sl_long_count++;  b.sl_long_size  += sz; }
@@ -272,7 +294,11 @@ export function buildSession(wallet: string, mode: SessionMode = 'paper'): { ser
       for (const L of wanted) {
         if (L.trigger_px != null && L.trigger_px >= lo && L.trigger_px <= hi) inRange++;
         placeAt(L.trigger_px, L.size, L.kind, L.side);
-        placeAt(L.entry_px, L.size, 'entry', null);
+        // Pass the leg's side through so the entry can be split into
+        // entry_long / entry_short based on the underlying position
+        // direction (which is the leg's `side` — sell-trigger=long,
+        // buy-trigger=short).
+        placeAt(L.entry_px, L.size, 'entry', L.side);
       }
       return json({
         asset_name: snap.asset_name,

@@ -108,6 +108,10 @@ async function streamAnthropic(o: ChatStreamOpts, sink: ChatSink): Promise<void>
     system: systemPrompt(o.mode),
     messages: o.messages.map((m) => ({ role: m.role, content: m.content })),
     mcp_servers: [{ type: 'url', url: mcpUrl(o.mode), name: 'slushy', authorization_token: o.mcpToken }],
+    // Each server in mcp_servers MUST be referenced by an mcp_toolset in tools,
+    // or the API 400s: "MCP server 'slushy' is defined but not referenced by
+    // any mcp_toolset in tools." mcp_server_name must match the server name above.
+    tools: [{ type: 'mcp_toolset', mcp_server_name: 'slushy' }],
     betas: ['mcp-client-2025-11-20'],
   });
 

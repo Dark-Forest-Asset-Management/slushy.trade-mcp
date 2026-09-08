@@ -381,7 +381,11 @@ export function buildSession(wallet: string, mode: SessionMode = 'paper'): { ser
         id: `ai-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
         coin,
         type: pluginType, anchors,
-        style: { lineColor: c, lineWidth: 2, lineDash: [], fillColor: c + '33', fillOpacity: 0.1, showLabels: true, labelFont: '12px sans-serif', labelColor: c },
+        // Text annotations get NO fill box (fully transparent) so the glyph
+        // sits directly on the chart; lines/fibs keep the faint fill.
+        style: pluginType === 'text-annotation'
+          ? { lineColor: c, lineWidth: 1, lineDash: [], fillColor: 'rgba(0,0,0,0)', fillOpacity: 0, showLabels: true, labelFont: '12px sans-serif', labelColor: c }
+          : { lineColor: c, lineWidth: 2, lineDash: [], fillColor: c + '33', fillOpacity: 0.1, showLabels: true, labelFont: '12px sans-serif', labelColor: c },
         options,
         ...(label ? { text: label } : {}),
       };

@@ -360,15 +360,29 @@ export function buildSession(wallet: string, mode: SessionMode = 'paper'): { ser
     },
     async ({ coin, type, anchors, color, label }) => {
       const c = color ?? '#22d3ee';
+      // The chart hydrates drawings via the plugin's fromJSON, which reads ONLY
+      // { id, type, anchors, style, options } (SerializedDrawing). The prior
+      // shape broke text two ways: (1) the plugin's freeform-text tool is
+      // 'text-annotation', not 'text'; (2) the string must live in options.text
+      // — a top-level `text` field is dropped by fromJSON, so the annotation
+      // hydrated empty and rendered invisible. Map + relocate here. (Text glyph
+      // color comes from style.lineColor; TextAnnotationOptions has no color.)
+      const pluginType = type === 'text' ? 'text-annotation' : type;
+      const options: Record<string, unknown> = { visible: true, locked: false, zIndex: 0 };
+      if (pluginType === 'text-annotation') {
+        options.text = label ?? '';
+        options.backgroundColor = 'transparent';
+        options.borderColor = 'transparent';
+      }
       const drawing = {
         // `ai-` id namespace: the slushy chart renders these but EXCLUDES
         // them from the user's saved snapshot (isAutoOverlayId). Stable id so
         // re-polls replace rather than duplicate. `coin` scopes it to one market.
         id: `ai-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
         coin,
-        type, anchors,
+        type: pluginType, anchors,
         style: { lineColor: c, lineWidth: 2, lineDash: [], fillColor: c + '33', fillOpacity: 0.1, showLabels: true, labelFont: '12px sans-serif', labelColor: c },
-        options: { visible: true, locked: false, zIndex: 0 },
+        options,
         ...(label ? { text: label } : {}),
       };
       return json({ ok: true, totalAgentDrawings: addAgentDrawing(wallet, drawing) });

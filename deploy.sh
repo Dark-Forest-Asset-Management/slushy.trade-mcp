@@ -14,7 +14,9 @@ set -euo pipefail
 #   --no-restart  push files + npm ci but skip the systemctl restart
 
 REMOTE_USER=debian
-REMOTE_HOST=slushy.trade
+# direct.slushy.trade, NOT the apex: slushy.trade is Cloudflare-proxied
+# (2026-09) and its A record resolves to edge IPs that refuse SSH.
+REMOTE_HOST=direct.slushy.trade
 REMOTE_DIR=/opt/slushy-trade-mcp
 SERVICE_NAME=slushy-trade-mcp
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

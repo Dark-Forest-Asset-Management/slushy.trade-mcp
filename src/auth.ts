@@ -66,7 +66,7 @@ export async function authenticate(authorization: string | undefined): Promise<A
     return {
       ok: false,
       status: 402,
-      error: 'No active supporter subscription or verified-executive access for this wallet. Subscribe at slushy.trade to unlock MCP access.',
+      error: 'No active supporter subscription for this wallet. Subscribe at slushy.trade to unlock MCP access.',
     };
   }
   return { ok: true, wallet: recovered.toLowerCase() };

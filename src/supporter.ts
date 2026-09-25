@@ -25,12 +25,15 @@ const ABI = [
 const provider = new ethers.JsonRpcProvider(config.arbitrumRpc);
 const contract = new ethers.Contract(config.supporterContract, ABI, provider);
 
-// VerifiedExecutiveAccess on HyperEVM — `verified(addr)` holders also get
-// access (the same gate slushy uses for its live-mode toggle).
+// VerifiedExecutiveAccess on HyperEVM. GRANDFATHER CLAUSE: `verified`
+// holders (the executive team) keep slushAI + MCP access without a
+// paid subscription. This is deliberately narrower than what VEN used
+// to mean — it no longer implies ad-free or anything mode-related.
 const VEN_ABI = ['function verified(address user) view returns (bool)'];
 const venProvider = new ethers.JsonRpcProvider(config.hyperevmRpc);
 const venContract = new ethers.Contract(config.venContract, VEN_ABI, venProvider);
 const venCache = new Map<string, { verified: boolean; checkedAt: number }>();
+
 
 interface CacheEntry { active: boolean; expiresAt: number; checkedAt: number; }
 const cache = new Map<string, CacheEntry>();
@@ -62,6 +65,7 @@ export async function isActiveSupporter(address: string): Promise<boolean> {
   return (await getSupporterStatus(address)).active;
 }
 
+
 /** True iff `address` holds the VerifiedExecutiveAccess flag on HyperEVM. */
 export async function isVerifiedExecutive(address: string): Promise<boolean> {
   const key = address.toLowerCase();
@@ -79,11 +83,16 @@ export interface AccessStatus {
   allowed: boolean;
 }
 
-/** Combined MCP-access gate: an active supporter OR a verified executive.
- *  Each chain is checked independently so one RPC being down can't block
- *  access granted by the other. Only surfaces an error if access is NOT
- *  granted AND the supporter (Arbitrum) check failed — so the caller can
- *  return 503 (retryable) rather than a false 402. */
+/** MCP-access gate: an active PAID supporter, or a GRANDFATHERED
+ *  VerifiedExecutiveAccess holder (the executive team).
+ *
+ *  Context (2026-09-25): live mode was decoupled from paid perks —
+ *  live users see ads, and slushAI/MCP are supporter features. VEN is
+ *  retained here as the one exception, scoped to exactly this gate.
+ *  Each chain is checked independently so one RPC being down can't
+ *  block access granted by the other; a supporter-check failure only
+ *  surfaces when access would otherwise be denied, so the caller can
+ *  answer 503 (retryable) rather than a false 402. */
 export async function getAccessStatus(address: string): Promise<AccessStatus> {
   let supporter: SupporterStatus = { active: false, expiresAt: 0 };
   let supporterErr: unknown;

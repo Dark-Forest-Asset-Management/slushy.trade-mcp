@@ -43,13 +43,16 @@ export const config = {
   // AdFreeSubscription contract on Arbitrum (named pre-rename; can't be
   // renamed on-chain). We read its `isPaidAdFree(address)` view.
   supporterContract: required('SUPPORTER_CONTRACT'),
+  // VerifiedExecutiveAccess on HyperEVM — GRANDFATHERED access for the
+  // executive team (slushAI + MCP tokens only; it grants nothing else
+  // since the 2026-09-25 decoupling of live mode from paid perks).
+  venContract: process.env.VEN_CONTRACT ?? '0x01A36bA46BB973A87353c07392191476F18c2fdE',
+  hyperevmRpc: process.env.HYPEREVM_RPC ?? 'https://rpc.hyperliquid.xyz/evm',
   arbitrumRpc: process.env.ARBITRUM_RPC ?? 'https://arb1.arbitrum.io/rpc',
 
   // Verified-executive access — VerifiedExecutiveAccess contract on HyperEVM.
   // `verified(addr)` holders also get MCP access (same gate slushy uses for
   // its live-mode toggle).
-  venContract: process.env.VEN_CONTRACT ?? '0x01A36bA46BB973A87353c07392191476F18c2fdE',
-  hyperevmRpc: process.env.HYPEREVM_RPC ?? 'https://rpc.hyperliquid.xyz/evm',
 
   supporterCacheTtlMs: Number.parseInt(process.env.SUPPORTER_CACHE_TTL_SECONDS ?? '60', 10) * 1000,
   supporterAllowlist: new Set(

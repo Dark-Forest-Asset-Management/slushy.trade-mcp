@@ -2,9 +2,11 @@
  * Thin HTTP client for the HyPaper backend.
  *
  * Trading goes through HyPaper's UNSIGNED exchange path (`{ wallet, action }`)
- * — the MCP server is trusted (gated by the supporter subscription) and acts
- * on behalf of the authenticated wallet, which HyPaper records as the paper
- * account. No HL L1 signing is needed (and the server holds no user keys).
+ * — the MCP server acts on behalf of a wallet whose control it has already
+ * verified (the MCP access token is that wallet's own signature), and it
+ * holds no user keys so it cannot sign. HyPaper accepts the unsigned form
+ * only from callers presenting the shared `x-hypaper-internal` secret —
+ * from anywhere else it is a public impersonation primitive.
  */
 
 import { config } from './config.js';
@@ -12,7 +14,7 @@ import { config } from './config.js';
 async function post(path: string, body: object): Promise<any> {
   const r = await fetch(`${config.hypaperHttpUrl}${path}`, {
     method: 'POST',
-    headers: { 'content-type': 'application/json' },
+    headers: { 'content-type': 'application/json', 'x-hypaper-internal': config.hypaperInternalSecret },
     body: JSON.stringify(body),
   });
   const text = await r.text();

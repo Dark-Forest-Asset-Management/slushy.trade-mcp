@@ -43,8 +43,12 @@ export interface SupporterStatus { active: boolean; expiresAt: number; }
 export async function getSupporterStatus(address: string): Promise<SupporterStatus> {
   const key = address.toLowerCase();
 
-  // Team/test escape hatch.
-  if (config.supporterAllowlist.has(key)) return { active: true, expiresAt: 0 };
+  // Team/test escape hatch — every grant is logged so an allowlisted
+  // wallet can never pass silently.
+  if (config.supporterAllowlist.has(key)) {
+    console.error(`[supporter] ALLOWLIST grant for ${key}`);
+    return { active: true, expiresAt: 0 };
+  }
 
   const now = Date.now();
   const cached = cache.get(key);
@@ -101,6 +105,7 @@ export async function getAccessStatus(address: string): Promise<AccessStatus> {
   let verifiedExecutive = false;
   try { verifiedExecutive = await isVerifiedExecutive(address); } catch { /* fail-closed */ }
 
+  if (!supporter.active && verifiedExecutive) console.error(`[supporter] VEN grant for ${address.toLowerCase()}`);
   const allowed = supporter.active || verifiedExecutive;
   if (!allowed && supporterErr) throw supporterErr;
   return { supporter, verifiedExecutive, allowed };

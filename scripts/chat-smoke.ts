@@ -26,10 +26,7 @@
  */
 
 import { ethers } from 'ethers';
-
-function mcpAccessMessage(address: string): string {
-  return `slushy.trade MCP access\nwallet: ${address.toLowerCase()}`;
-}
+import { mintSiweToken } from './mint-siwe-token.js';
 
 const DEFAULT_MODELS: Record<string, string> = {
   anthropic: 'claude-sonnet-4-6',
@@ -39,8 +36,7 @@ const DEFAULT_MODELS: Record<string, string> = {
 
 async function mintToken(pk: string): Promise<string> {
   const wallet = new ethers.Wallet(pk);
-  const signature = await wallet.signMessage(mcpAccessMessage(wallet.address));
-  return Buffer.from(JSON.stringify({ address: wallet.address, signature }), 'utf8').toString('base64url');
+  return mintSiweToken(wallet);
 }
 
 /** Infer the provider from the key prefix (Anthropic sk-ant-, Gemini AIza, else

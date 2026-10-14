@@ -25,6 +25,20 @@ export const config = {
 
   // HyPaper backend this MCP server proxies.
   hypaperHttpUrl: (process.env.HYPAPER_HTTP_URL ?? 'http://localhost:3000').replace(/\/$/, ''),
+  // Presented to HyPaper on every request so its unsigned `{wallet}`
+  // /exchange path and /hypaper admin actions accept us. Required: without
+  // it HyPaper (correctly) refuses every unsigned action.
+  hypaperInternalSecret: required('HYPAPER_INTERNAL_SECRET'),
+  // HMAC key for short-lived delegate tokens handed to LLM vendors during
+  // a chat (src/auth.ts). Required so the forwarded credential is never
+  // the user's own wallet token.
+  delegateSecret: required('MCP_DELEGATE_SECRET'),
+  // Browser origins allowed to call the HTTP routes. Reflecting any Origin
+  // removed origin as a barrier once a token leaked (2026-10-13, M18).
+  corsOrigins: new Set(
+    (process.env.CORS_ORIGINS ?? `${publicBaseUrl},http://localhost:5173`)
+      .split(',').map((s) => s.trim().replace(/\/$/, '')).filter(Boolean),
+  ),
   hypaperWsUrl: process.env.HYPAPER_WS_URL ?? 'ws://localhost:3000/ws',
 
   // Real Hyperliquid /info — used for LIVE-mode user reads (account, positions,

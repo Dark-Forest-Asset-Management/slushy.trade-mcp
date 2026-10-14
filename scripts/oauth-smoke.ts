@@ -12,6 +12,7 @@
 import http from 'node:http';
 import { createHash, randomBytes } from 'node:crypto';
 import { ethers } from 'ethers';
+import { mintSiweToken } from './mint-siwe-token.js';
 
 const PORT = Number(process.env.PORT ?? 8799);
 const RPC_PORT = PORT + 1;
@@ -57,7 +58,6 @@ const check = (name: string, ok: boolean, detail: string) => {
 
   const { createApp } = await import('../src/server.js');
   const { authenticate } = await import('../src/auth.js');
-  const { mcpAccessMessage } = await import('../src/auth.js');
   const { app } = createApp();
   const server = app.listen(PORT);
   await new Promise<void>((r) => server.on('listening', () => r()));
@@ -114,8 +114,7 @@ const check = (name: string, ok: boolean, detail: string) => {
 
   // 6. consent completes with a REAL wallet signature
   const wallet = ethers.Wallet.createRandom();
-  const sig = await wallet.signMessage(mcpAccessMessage(wallet.address));
-  const walletToken = Buffer.from(JSON.stringify({ address: wallet.address, signature: sig })).toString('base64url');
+  const walletToken = await mintSiweToken(wallet);
   const complete = await json('/oauth/authorize/complete', {
     method: 'POST', headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ authzId, token: walletToken }),

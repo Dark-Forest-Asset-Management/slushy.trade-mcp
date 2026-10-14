@@ -16,15 +16,11 @@
 import { ethers } from 'ethers';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
-
-function mcpAccessMessage(address: string): string {
-  return `slushy.trade MCP access\nwallet: ${address.toLowerCase()}`;
-}
+import { mintSiweToken } from './mint-siwe-token.js';
 
 async function mintToken(pk: string): Promise<string> {
   const wallet = new ethers.Wallet(pk);
-  const signature = await wallet.signMessage(mcpAccessMessage(wallet.address));
-  return Buffer.from(JSON.stringify({ address: wallet.address, signature }), 'utf8').toString('base64url');
+  return mintSiweToken(wallet);
 }
 
 const base = (process.env.MCP_URL ?? 'http://localhost:8788').replace(/\/$/, '');

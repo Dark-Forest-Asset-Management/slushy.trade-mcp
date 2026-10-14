@@ -14,7 +14,10 @@ import express, { type Request, type Response } from 'express';
 import { randomUUID } from 'node:crypto';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { isInitializeRequest } from '@modelcontextprotocol/sdk/types.js';
-import { authenticate } from './auth.js';
+import { authenticate, mintDelegateToken } from './auth.js';
+
+/** Lifetime of the delegate token forwarded to an LLM vendor for one chat. */
+const CHAT_DELEGATE_TTL_MS = 60 * 60 * 1000;
 import * as oauth from './oauth.js';
 import { buildSession } from './mcp.js';
 import { streamChat, type ChatMessage, type ChatProvider } from './chat.js';
@@ -34,7 +37,10 @@ export function createApp() {
   // safe. Expose mcp-session-id so a browser MCP client can read it. Preflight
   // (OPTIONS) is answered here before any body parsing.
   app.use((req: Request, res: Response, next) => {
-    res.header('Access-Control-Allow-Origin', req.headers.origin ?? '*');
+    const origin = (req.headers.origin ?? '').replace(/\/$/, '');
+    if (origin && config.corsOrigins.has(origin)) {
+      res.header('Access-Control-Allow-Origin', origin);
+    }
     res.header('Vary', 'Origin');
     res.header('Access-Control-Allow-Methods', 'GET, POST, DELETE, OPTIONS');
     res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization, mcp-session-id, mcp-protocol-version, last-event-id');
@@ -195,9 +201,11 @@ export function createApp() {
       : [];
     if (messages.length === 0) { res.status(400).json({ error: 'messages must be a non-empty array' }); return; }
 
-    // Same token the client authenticated with — re-used as the MCP credential
-    // the provider presents back to /mcp (no "Bearer" prefix for the connectors).
-    const mcpToken = (req.headers.authorization ?? '').replace(/^Bearer\s+/i, '').trim();
+    // The credential the LLM vendor's host presents back to /mcp is a
+    // short-lived, chat-scoped delegate minted here — never the user's own
+    // wallet token (which would otherwise sit in a third party's logs for
+    // its whole lifetime).
+    const mcpToken = mintDelegateToken(auth.wallet, CHAT_DELEGATE_TTL_MS);
 
     res.setHeader('Content-Type', 'text/event-stream');
     res.setHeader('Cache-Control', 'no-cache, no-transform');

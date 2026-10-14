@@ -10,11 +10,11 @@
 import { ethers } from 'ethers';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
+import { mintSiweToken } from './mint-siwe-token.js';
 
 const URL_ = process.argv[2] ?? 'http://127.0.0.1:8788/mcp';
 const PK = '0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80'; // hardhat #0
 
-function mcpAccessMessage(a: string) { return `slushy.trade MCP access\nwallet: ${a.toLowerCase()}`; }
 
 let pass = 0, fail = 0;
 const check = (n: string, ok: boolean, d: string) => { console.log(`${ok ? 'PASS' : 'FAIL'}  ${n}\n      ${d}`); ok ? pass++ : fail++; };
@@ -35,8 +35,7 @@ async function connect(token?: string): Promise<Client> {
 
   // mint token for the allowlisted wallet
   const w = new ethers.Wallet(PK);
-  const sig = await w.signMessage(mcpAccessMessage(w.address));
-  const token = Buffer.from(JSON.stringify({ address: w.address, signature: sig })).toString('base64url');
+  const token = await mintSiweToken(w);
 
   // 2 + 3 + 4
   const client = await connect(token);
